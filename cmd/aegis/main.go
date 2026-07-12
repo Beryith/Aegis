@@ -132,8 +132,43 @@ func countBySource(db *sql.DB, scanID string, source string) int {
 	return count
 }
 
+func getProviderTimeout() int {
+	config := loadAegisConfig()
+	ai, ok := config["ai"].(map[string]interface{})
+	if !ok {
+		return 900
+	}
+	provider, ok := ai["provider"].(string)
+	if !ok {
+		return 900
+	}
+
+	baseTimeouts := map[string]int{
+		"ollama":    900,
+		"groq":      60,
+		"gemini":    60,
+		"openai":    60,
+		"anthropic": 60,
+	}
+
+	if t, ok := baseTimeouts[provider]; ok {
+		return t
+	}
+	return 900
+}
+
+func countTotalFindings(db *sql.DB, scanID string) int {
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM findings WHERE scan_id = $1", scanID).Scan(&count)
+	return count
+}
+
 func waitForCompletion(db *sql.DB, scanID string) {
-	maxWait := 600
+	baseTimeout := getProviderTimeout()
+
+	// Petite marge de sécurité une fois qu'on connaît le volume de findings
+	// (recalculée après la phase Discovery, cf boucle plus bas)
+	maxWait := baseTimeout
 	elapsed := 0
 	interval := 2
 	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -176,6 +211,16 @@ func waitForCompletion(db *sql.DB, scanID string) {
 				fmt.Printf("\r✓ %-14s terminé  (%d finding(s))                    \n", stages[currentStage].label, count)
 				stages[currentStage].done = true
 				currentStage++
+
+				// Recalcule le budget de temps une fois qu'on connaît le volume réel de findings
+				if stages[currentStage-1].source == "intelligence" {
+					total := countTotalFindings(db, scanID)
+					bonus := 0
+					if total > 10 {
+						bonus = (total - 10) * 5
+					}
+					maxWait = baseTimeout + bonus
+				}
 			}
 		}
 

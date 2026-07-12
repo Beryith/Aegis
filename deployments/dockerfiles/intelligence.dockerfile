@@ -10,6 +10,7 @@ COPY services/intelligence/main.py ./
 COPY services/utils.py ./
 COPY services/logger.py ./
 COPY services/health.py ./
+COPY services/cpe_mapper.py ./
 
 EXPOSE 9102
 

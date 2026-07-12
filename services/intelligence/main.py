@@ -12,6 +12,7 @@ sys.path.append('/home/krow/aegis/services')
 from utils import connect_with_retry, run_with_retry
 from logger import get_logger
 from health import HealthServer
+from cpe_mapper import build_cpe_match_string, extract_version
 
 log = get_logger("intelligence")
 
@@ -22,43 +23,68 @@ HEALTH_PORT = 9102
 
 health = HealthServer("intelligence", HEALTH_PORT)
 
+async def _query_nvd(url: str) -> list:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 404:
+                return []
+            if resp.status != 200:
+                log.warning(f"NVD erreur HTTP {resp.status}")
+                return []
+            data = await resp.json()
+            cves = []
+            for item in data.get("vulnerabilities", []):
+                cve = item.get("cve", {})
+                cve_id = cve.get("id", "")
+                descriptions = cve.get("descriptions", [])
+                desc = next((d["value"] for d in descriptions if d["lang"] == "en"), "")
+                metrics = cve.get("metrics", {})
+                score = None
+                severity = "unknown"
+                if "cvssMetricV31" in metrics:
+                    cvss = metrics["cvssMetricV31"][0]["cvssData"]
+                    score = cvss.get("baseScore")
+                    severity = cvss.get("baseSeverity", "unknown").lower()
+                elif "cvssMetricV2" in metrics:
+                    cvss = metrics["cvssMetricV2"][0]["cvssData"]
+                    score = cvss.get("baseScore")
+                    severity = "medium"
+                cves.append({
+                    "cve_id": cve_id,
+                    "description": desc[:300],
+                    "score": score,
+                    "severity": severity
+                })
+            return cves
+
 async def lookup_cve(service: str, version: str) -> list:
     if not service or not version:
         return []
-    keyword = f"{service} {version}"
+
+    # Tentative 1 — recherche précise par CPE
+    cpe_match = build_cpe_match_string(service, version)
+    if cpe_match:
+        url = f"{NVD_API}?virtualMatchString={cpe_match}&resultsPerPage=10"
+        try:
+            cves = await _query_nvd(url)
+            if cves:
+                log.info(f"Match CPE réussi : {cpe_match} → {len(cves)} CVE(s)")
+                return cves
+            log.info(f"Match CPE sans résultat : {cpe_match} — fallback keyword")
+        except Exception as e:
+            log.warning(f"Erreur CPE lookup pour {cpe_match}: {e}")
+
+    # Tentative 2 — fallback recherche par mot-clé (moins précis mais plus permissif)
+    clean_version = extract_version(version)
+    keyword = f"{service} {clean_version}".strip()
     url = f"{NVD_API}?keywordSearch={keyword}&resultsPerPage=5"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                cves = []
-                for item in data.get("vulnerabilities", []):
-                    cve = item.get("cve", {})
-                    cve_id = cve.get("id", "")
-                    descriptions = cve.get("descriptions", [])
-                    desc = next((d["value"] for d in descriptions if d["lang"] == "en"), "")
-                    metrics = cve.get("metrics", {})
-                    score = None
-                    severity = "unknown"
-                    if "cvssMetricV31" in metrics:
-                        cvss = metrics["cvssMetricV31"][0]["cvssData"]
-                        score = cvss.get("baseScore")
-                        severity = cvss.get("baseSeverity", "unknown").lower()
-                    elif "cvssMetricV2" in metrics:
-                        cvss = metrics["cvssMetricV2"][0]["cvssData"]
-                        score = cvss.get("baseScore")
-                        severity = "medium"
-                    cves.append({
-                        "cve_id": cve_id,
-                        "description": desc[:300],
-                        "score": score,
-                        "severity": severity
-                    })
-                return cves
+        cves = await _query_nvd(url)
+        if cves:
+            log.info(f"Match keyword réussi : {keyword} → {len(cves)} CVE(s)")
+        return cves
     except Exception as e:
-        log.warning(f"Erreur CVE lookup pour {keyword}: {e}")
+        log.warning(f"Erreur keyword lookup pour {keyword}: {e}")
         return []
 
 async def lookup_whois(host: str) -> dict:
