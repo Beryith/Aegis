@@ -81,6 +81,7 @@ async def handle_scan_request(msg):
         findings = await scan_target(target)
         log.info(f"{len(findings)} findings trouvés")
 
+        enrichment_count = 0
         for finding in findings:
             asset_id = await run_with_retry(store_asset, conn, finding["host"])
             await run_with_retry(store_finding, conn, scan_id, asset_id, finding)
@@ -94,10 +95,21 @@ async def handle_scan_request(msg):
                     "version": finding["version"],
                 }).encode()
                 await nc.publish("aegis.intelligence.enrich", payload)
+                enrichment_count += 1
                 log.info(f"Envoyé à intelligence : {finding['service']} {finding['version']}")
 
-        await nc.publish("aegis.correlation.run", json.dumps({"scan_id": scan_id}).encode())
-        log.info(f"Corrélation déclenchée pour le scan {scan_id}")
+        if enrichment_count > 0:
+            # Intelligence se chargera de déclencher la corrélation
+            # une fois TOUTES les tâches d'enrichissement terminées.
+            await conn.execute(
+                "UPDATE scans SET pending_enrichments = $1 WHERE id = $2",
+                enrichment_count, scan_id
+            )
+            log.info(f"{enrichment_count} tâche(s) d'enrichissement en attente pour le scan {scan_id}")
+        else:
+            # Aucun enrichissement nécessaire, on peut corréler immédiatement
+            await nc.publish("aegis.correlation.run", json.dumps({"scan_id": scan_id}).encode())
+            log.info(f"Corrélation déclenchée directement pour le scan {scan_id} (aucun enrichissement requis)")
 
     except Exception as e:
         health.set_check("last_task", False, str(e))

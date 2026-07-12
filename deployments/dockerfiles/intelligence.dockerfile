@@ -7,6 +7,7 @@ WORKDIR /app
 RUN pip install nats-py asyncpg aiohttp python-whois --no-cache-dir
 
 COPY services/intelligence/main.py ./
+COPY services/intelligence/update_exploitdb.py ./
 COPY services/utils.py ./
 COPY services/logger.py ./
 COPY services/health.py ./

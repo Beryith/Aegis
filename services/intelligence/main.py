@@ -14,6 +14,8 @@ from logger import get_logger
 from health import HealthServer
 from cpe_mapper import build_cpe_match_string, extract_version
 
+nc = None
+
 log = get_logger("intelligence")
 
 DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
@@ -99,22 +101,65 @@ async def lookup_whois(host: str) -> dict:
         log.warning(f"Erreur WHOIS pour {host}: {e}")
         return {}
 
+async def check_public_exploit(conn, cve_id: str) -> dict:
+    """
+    Vérifie si un exploit public est référencé dans la base exploit-db locale
+    pour la CVE donnée.
+    """
+    row = await conn.fetchrow("""
+        SELECT edb_id, title, exploit_type, verified
+        FROM exploit_db
+        WHERE $1 = ANY(cve_ids)
+        ORDER BY verified DESC
+        LIMIT 1
+    """, cve_id)
+
+    if row:
+        return {
+            "exploit_available": True,
+            "edb_id": row["edb_id"],
+            "exploit_title": row["title"],
+            "exploit_type": row["exploit_type"],
+            "verified": row["verified"]
+        }
+    return {"exploit_available": False}
+
+
 async def store_finding(conn, scan_id: str, asset_id: str, cve: dict, original_title: str):
     severity_map = {
         "critical": "critical", "high": "high",
         "medium": "medium", "low": "low", "unknown": "info"
     }
     severity = severity_map.get(cve["severity"], "info")
+
+    exploit_info = await check_public_exploit(conn, cve["cve_id"])
+
+    # Un exploit public disponible élève la sévérité effective d'un cran
+    # (une CVE "medium" avec exploit public est plus urgente qu'une "medium" théorique)
+    effective_severity = severity
+    if exploit_info["exploit_available"]:
+        escalation = {"info": "low", "low": "medium", "medium": "high", "high": "critical"}
+        effective_severity = escalation.get(severity, severity)
+
     title = f"{cve['cve_id']} détecté — {original_title}"
+    if exploit_info["exploit_available"]:
+        title += " ⚠ EXPLOIT PUBLIC DISPONIBLE"
+
+    metadata = {**cve, "exploit": exploit_info}
+
     await conn.execute("""
         INSERT INTO findings (asset_id, scan_id, source, type, title, description, severity, confidence, status, discovered_at, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     """,
         asset_id, scan_id, "intelligence", "vulnerability",
-        title, cve["description"], severity, 0.80, "open",
-        datetime.now(timezone.utc), json.dumps(cve)
+        title, cve["description"], effective_severity, 0.80, "open",
+        datetime.now(timezone.utc), json.dumps(metadata)
     )
-    log.info(f"CVE stockée : {title} [{severity}]")
+
+    if exploit_info["exploit_available"]:
+        log.warning(f"CVE avec exploit public : {title} [{effective_severity}]")
+    else:
+        log.info(f"CVE stockée : {title} [{effective_severity}]")
 
 async def handle_intelligence_request(msg):
     data = json.loads(msg.data.decode())
@@ -143,6 +188,21 @@ async def handle_intelligence_request(msg):
                 UPDATE assets SET metadata = metadata || $1 WHERE id = $2
             """, json.dumps({"whois": whois_data}), asset_id)
             log.info(f"WHOIS stocké pour {host}")
+
+        # Décrémente le compteur de tâches en attente pour ce scan.
+        # Quand il atteint 0, TOUTES les tâches d'enrichissement sont terminées
+        # et on peut déclencher la corrélation en toute sécurité.
+        row = await conn.fetchrow("""
+            UPDATE scans
+            SET pending_enrichments = pending_enrichments - 1
+            WHERE id = $1
+            RETURNING pending_enrichments
+        """, scan_id)
+
+        if row and row["pending_enrichments"] <= 0:
+            await nc.publish("aegis.correlation.run", json.dumps({"scan_id": scan_id}).encode())
+            log.info(f"Toutes les tâches d'enrichissement terminées — corrélation déclenchée pour {scan_id}")
+
     except Exception as e:
         health.set_check("last_task", False, str(e))
         log.error(f"Erreur enrichissement : {e}")
@@ -151,6 +211,8 @@ async def handle_intelligence_request(msg):
 
 async def main():
     log.info("Démarrage")
+
+    global nc
 
     async def nats_connect():
         return await nats.connect(NATS_URL)
