@@ -46,6 +46,9 @@ async def correlate(scan_id: str, conn):
 
     correlations = []
 
+    def get_meta(f):
+        return f["metadata"] if isinstance(f["metadata"], dict) else json.loads(f["metadata"] or "{}")
+
     for asset_id, data in assets.items():
         host = data["host"]
         findings_list = data["findings"]
@@ -53,25 +56,47 @@ async def correlate(scan_id: str, conn):
         open_ports = [f for f in findings_list if f["type"] == "open_port"]
         vulnerabilities = [f for f in findings_list if f["type"] == "vulnerability"]
 
+        # Règle 1 — Port ouvert + CVE trouvée, groupées PAR SERVICE
         if open_ports and vulnerabilities:
-            correlations.append({
-                "asset_id": asset_id,
-                "host": host,
-                "severity": "high",
-                "title": f"Service vulnérable exposé sur {host}",
-                "description": f"{len(vulnerabilities)} CVE(s) trouvée(s) sur {len(open_ports)} port(s) ouvert(s)",
-                "finding_ids": [f["id"] for f in open_ports + vulnerabilities]
-            })
+            services_with_ports = {get_meta(f).get("service", "unknown") for f in open_ports}
 
+            for service_name in services_with_ports:
+                service_vulns = [
+                    v for v in vulnerabilities
+                    if service_name.lower() in v["title"].lower()
+                ]
+                service_ports = [
+                    p for p in open_ports
+                    if get_meta(p).get("service", "unknown") == service_name
+                ]
+
+                if service_vulns:
+                    exploit_count = sum(
+                        1 for v in service_vulns
+                        if get_meta(v).get("exploit", {}).get("exploit_available")
+                    )
+                    severity = "critical" if exploit_count > 0 else "high"
+
+                    correlations.append({
+                        "asset_id": asset_id,
+                        "host": host,
+                        "severity": severity,
+                        "title": f"Service {service_name} vulnérable exposé sur {host}",
+                        "description": f"{len(service_vulns)} CVE(s) trouvée(s) sur le service {service_name}"
+                                        + (f", dont {exploit_count} avec exploit public disponible" if exploit_count else ""),
+                        "finding_ids": [f["id"] for f in service_ports + service_vulns]
+                    })
+
+        # Règle 2 — Service d'administration exposé
         admin_ports = []
         for f in open_ports:
-            meta = f["metadata"] if isinstance(f["metadata"], dict) else json.loads(f["metadata"] or "{}")
+            meta = get_meta(f)
             service = meta.get("service", "")
             if service in ADMIN_SERVICES:
                 admin_ports.append(f)
 
         if admin_ports:
-            services = [json.loads(f["metadata"] or "{}").get("service", "") if isinstance(f["metadata"], str) else f["metadata"].get("service", "") for f in admin_ports]
+            services = [get_meta(f).get("service", "") for f in admin_ports]
             correlations.append({
                 "asset_id": asset_id,
                 "host": host,
@@ -81,6 +106,7 @@ async def correlate(scan_id: str, conn):
                 "finding_ids": [f["id"] for f in admin_ports]
             })
 
+        # Règle 3 — Surface d'attaque élargie
         if len(open_ports) > 3:
             correlations.append({
                 "asset_id": asset_id,
