@@ -1,0 +1,19 @@
+# Go
+*.exe
+*.out
+/bin/
+
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
+
+# Secrets
+*.key
+*.pem
+.env*
+
+# IDE
+.vscode/
+.idea/
