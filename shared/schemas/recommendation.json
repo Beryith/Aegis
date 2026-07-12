@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Recommendation",
+  "type": "object",
+  "required": ["id", "scan_id", "priority", "title", "findings_summary", "recommendation"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "scan_id": { "type": "string", "format": "uuid" },
+    "priority": { "type": "string", "enum": ["immediate", "short_term", "medium_term", "long_term"] },
+    "title": { "type": "string" },
+    "findings_summary": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "severity", "title"],
+        "properties": {
+          "finding_id": { "type": "string", "format": "uuid" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+          "title": { "type": "string" }
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["context", "action", "impact", "effort"],
+      "properties": {
+        "context": { "type": "string" },
+        "action": { "type": "string" },
+        "impact": { "type": "string" },
+        "effort": { "type": "string", "enum": ["low", "medium", "high"] }
+      }
+    },
+    "generated_by": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" }
+  }
+}

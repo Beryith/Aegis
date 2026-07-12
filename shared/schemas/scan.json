@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan",
+  "type": "object",
+  "required": ["id", "status", "profile", "scope"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] },
+    "profile": { "type": "string", "enum": ["passive", "active", "aggressive"] },
+    "scope": {
+      "type": "object",
+      "required": ["targets"],
+      "properties": {
+        "targets": { "type": "array", "items": { "type": "string" } },
+        "excluded": { "type": "array", "items": { "type": "string" } },
+        "authorized_by": { "type": "string" }
+      }
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "created_by": { "type": "string" },
+    "findings_count": {
+      "type": "object",
+      "properties": {
+        "critical": { "type": "integer" },
+        "high": { "type": "integer" },
+        "medium": { "type": "integer" },
+        "low": { "type": "integer" },
+        "info": { "type": "integer" }
+      }
+    }
+  }
+}
