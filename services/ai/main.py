@@ -1,23 +1,26 @@
 import asyncio
 import json
-import logging
 import os
 import aiohttp
 import asyncpg
 import nats
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
-import os
 import sys
+sys.path.append('/app')
 sys.path.append('/home/krow/aegis/services')
 from utils import connect_with_retry, run_with_retry
+from logger import get_logger
+from health import HealthServer
 
-logging.basicConfig(level=logging.INFO, format='[ai] %(message)s')
-log = logging.getLogger(__name__)
+log = get_logger("ai")
 
 DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
 NATS_URL = os.getenv("NATS_URL", "nats://aegis:aegis@localhost:4222")
 CONFIG_PATH = os.path.expanduser("~/.aegis/config.json")
+HEALTH_PORT = 9104
+
+health = HealthServer("ai", HEALTH_PORT)
 
 class AIProvider(ABC):
     @abstractmethod
@@ -71,7 +74,8 @@ class GroqProvider(AIProvider):
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status != 200:
-                        log.error(f"Groq erreur HTTP {resp.status}")
+                        body = await resp.text()
+                        log.error(f"Groq erreur HTTP {resp.status} : {body[:300]}")
                         return ""
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"].strip()
