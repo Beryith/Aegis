@@ -5,6 +5,9 @@ import nmap
 import asyncpg
 import nats
 from datetime import datetime, timezone
+import sys
+sys.path.append('/home/krow/aegis/services')
+from utils import connect_with_retry, run_with_retry
 
 logging.basicConfig(level=logging.INFO, format='[discovery] %(message)s')
 log = logging.getLogger(__name__)
@@ -32,7 +35,6 @@ async def scan_target(target: str) -> list:
                     "service": service["name"],
                     "version": service.get("version", ""),
                 })
-
     return findings
 
 async def store_finding(conn, scan_id: str, asset_id: str, finding: dict):
@@ -41,16 +43,8 @@ async def store_finding(conn, scan_id: str, asset_id: str, finding: dict):
         INSERT INTO findings (asset_id, scan_id, source, type, title, severity, confidence, status, discovered_at, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     """,
-        asset_id,
-        scan_id,
-        "discovery",
-        "open_port",
-        title,
-        "info",
-        0.95,
-        "open",
-        datetime.now(timezone.utc),
-        json.dumps(finding)
+        asset_id, scan_id, "discovery", "open_port", title,
+        "info", 0.95, "open", datetime.now(timezone.utc), json.dumps(finding)
     )
     log.info(f"Finding stocké : {title}")
 
@@ -64,7 +58,6 @@ async def store_asset(conn, host: str) -> str:
 
     if row:
         return str(row["id"])
-
     row = await conn.fetchrow("SELECT id FROM assets WHERE value = $1", host)
     return str(row["id"])
 
@@ -75,16 +68,18 @@ async def handle_scan_request(msg):
 
     log.info(f"Tâche reçue — scan_id={scan_id} target={target}")
 
-    conn = await asyncpg.connect(DB_URL)
+    async def db_connect():
+        return await asyncpg.connect(DB_URL)
+
+    conn = await connect_with_retry(db_connect, "PostgreSQL")
     try:
         findings = await scan_target(target)
         log.info(f"{len(findings)} findings trouvés")
 
         for finding in findings:
-            asset_id = await store_asset(conn, finding["host"])
-            await store_finding(conn, scan_id, asset_id, finding)
+            asset_id = await run_with_retry(store_asset, conn, finding["host"])
+            await run_with_retry(store_finding, conn, scan_id, asset_id, finding)
 
-            # Publier vers l'Intelligence Service
             if finding.get("service") and finding.get("version"):
                 payload = json.dumps({
                     "scan_id": scan_id,
@@ -95,16 +90,18 @@ async def handle_scan_request(msg):
                 }).encode()
                 await nc.publish("aegis.intelligence.enrich", payload)
                 log.info(f"Envoyé à intelligence : {finding['service']} {finding['version']}")
-
     finally:
         await conn.close()
 
 async def main():
     global nc
-    log.info("Démarrage")
-    nc = await nats.connect(NATS_URL)
-    log.info("NATS connecté")
 
+    log.info("Démarrage")
+
+    async def nats_connect():
+        return await nats.connect(NATS_URL)
+
+    nc = await connect_with_retry(nats_connect, "NATS")
     await nc.subscribe("aegis.discovery.scan", cb=handle_scan_request)
     log.info("En attente de tâches sur aegis.discovery.scan")
 

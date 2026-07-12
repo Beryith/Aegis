@@ -4,6 +4,9 @@ import logging
 import asyncpg
 import nats
 from datetime import datetime, timezone
+import sys
+sys.path.append('/home/krow/aegis/services')
+from utils import connect_with_retry, run_with_retry
 
 logging.basicConfig(level=logging.INFO, format='[correlator] %(message)s')
 log = logging.getLogger(__name__)
@@ -16,7 +19,6 @@ ADMIN_SERVICES = ["ssh", "rdp", "telnet", "ftp", "vnc", "mysql", "postgresql", "
 async def correlate(scan_id: str, conn):
     log.info(f"Corrélation du scan {scan_id}")
 
-    # Récupérer tous les findings du scan
     findings = await conn.fetch("""
         SELECT f.id, f.asset_id, f.source, f.type, f.title,
                f.severity, f.metadata, a.value as host
@@ -29,7 +31,6 @@ async def correlate(scan_id: str, conn):
         log.info("Aucun finding à corréler")
         return
 
-    # Grouper par asset
     assets = {}
     for f in findings:
         aid = str(f["asset_id"])
@@ -66,7 +67,7 @@ async def correlate(scan_id: str, conn):
                 admin_ports.append(f)
 
         if admin_ports:
-            services = [json.loads(f["metadata"] or "{}").get("service", "") for f in admin_ports]
+            services = [json.loads(f["metadata"] or "{}").get("service", "") if isinstance(f["metadata"], str) else f["metadata"].get("service", "") for f in admin_ports]
             correlations.append({
                 "asset_id": asset_id,
                 "host": host,
@@ -87,22 +88,14 @@ async def correlate(scan_id: str, conn):
                 "finding_ids": [f["id"] for f in open_ports]
             })
 
-    # Stocker les corrélations comme findings
     for corr in correlations:
-        await conn.execute("""
+        await run_with_retry(conn.execute, """
             INSERT INTO findings (asset_id, scan_id, source, type, title, description, severity, confidence, status, discovered_at, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         """,
-            corr["asset_id"],
-            scan_id,
-            "correlation",
-            "exposure",
-            corr["title"],
-            corr["description"],
-            corr["severity"],
-            0.90,
-            "open",
-            datetime.now(timezone.utc),
+            corr["asset_id"], scan_id, "correlation", "exposure",
+            corr["title"], corr["description"], corr["severity"],
+            0.90, "open", datetime.now(timezone.utc),
             json.dumps({"correlated_findings": [str(fid) for fid in corr["finding_ids"]]})
         )
         log.info(f"Corrélation stockée : {corr['title']} [{corr['severity']}]")
@@ -113,7 +106,10 @@ async def handle_correlate_request(msg):
     data = json.loads(msg.data.decode())
     scan_id = data.get("scan_id")
 
-    conn = await asyncpg.connect(DB_URL)
+    async def db_connect():
+        return await asyncpg.connect(DB_URL)
+
+    conn = await connect_with_retry(db_connect, "PostgreSQL")
     try:
         await correlate(scan_id, conn)
     finally:
@@ -121,9 +117,12 @@ async def handle_correlate_request(msg):
 
 async def main():
     log.info("Démarrage")
-    nc = await nats.connect(NATS_URL)
-    log.info("NATS connecté")
 
+    async def nats_connect():
+        return await nats.connect(NATS_URL)
+
+    nc = await nats.connect(NATS_URL)
+    nc = await connect_with_retry(nats_connect, "NATS")
     await nc.subscribe("aegis.correlation.run", cb=handle_correlate_request)
     log.info("En attente de tâches sur aegis.correlation.run")
 

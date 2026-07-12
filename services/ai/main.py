@@ -7,6 +7,9 @@ import asyncpg
 import nats
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
+import sys
+sys.path.append('/home/krow/aegis/services')
+from utils import connect_with_retry, run_with_retry
 
 logging.basicConfig(level=logging.INFO, format='[ai] %(message)s')
 log = logging.getLogger(__name__)
@@ -14,8 +17,6 @@ log = logging.getLogger(__name__)
 DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
 NATS_URL = "nats://aegis:aegis@localhost:4222"
 CONFIG_PATH = os.path.expanduser("~/.aegis/config.json")
-
-# ─── Providers ────────────────────────────────────────────
 
 class AIProvider(ABC):
     @abstractmethod
@@ -88,8 +89,7 @@ class GeminiProvider(AIProvider):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
                 payload = {"contents": [{"parts": [{"text": prompt}]}]}
                 async with session.post(
-                    url,
-                    json=payload,
+                    url, json=payload,
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status != 200:
@@ -120,8 +120,7 @@ class OpenAIProvider(AIProvider):
                 }
                 async with session.post(
                     "https://api.openai.com/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
+                    headers=headers, json=payload,
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status != 200:
@@ -153,8 +152,7 @@ class AnthropicProvider(AIProvider):
                 }
                 async with session.post(
                     "https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    json=payload,
+                    headers=headers, json=payload,
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status != 200:
@@ -165,8 +163,6 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             log.error(f"Erreur Anthropic : {e}")
             return ""
-
-# ─── Config ───────────────────────────────────────────────
 
 def load_config() -> dict:
     try:
@@ -193,8 +189,6 @@ def get_provider(config: dict) -> AIProvider:
     cls = providers.get(provider_name, OllamaProvider)
     log.info(f"Provider actif : {provider_name}")
     return cls(provider_config)
-
-# ─── Core ─────────────────────────────────────────────────
 
 async def generate_recommendation(scan_id: str, conn, provider: AIProvider):
     log.info(f"Génération pour le scan {scan_id}")
@@ -257,7 +251,7 @@ Réponds en français. Fournis une analyse structurée avec exactement ce format
 
         rec = json.loads(response[start:end])
 
-        await conn.execute("""
+        await run_with_retry(conn.execute, """
             INSERT INTO recommendations (scan_id, priority, title, findings_summary, recommendation, generated_by, generated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
         """,
@@ -288,7 +282,10 @@ async def handle_ai_request(msg):
     config = load_config()
     provider = get_provider(config)
 
-    conn = await asyncpg.connect(DB_URL)
+    async def db_connect():
+        return await asyncpg.connect(DB_URL)
+
+    conn = await connect_with_retry(db_connect, "PostgreSQL")
     try:
         await generate_recommendation(scan_id, conn, provider)
     finally:
@@ -299,8 +296,10 @@ async def main():
     config = load_config()
     provider_name = config.get("ai", {}).get("provider", "ollama")
 
-    nc = await nats.connect(NATS_URL)
-    log.info("NATS connecté")
+    async def nats_connect():
+        return await nats.connect(NATS_URL)
+
+    nc = await connect_with_retry(nats_connect, "NATS")
     log.info(f"Provider actif : {provider_name}")
 
     await nc.subscribe("aegis.ai.analyze", cb=handle_ai_request)

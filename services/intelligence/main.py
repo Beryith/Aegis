@@ -6,6 +6,9 @@ import whois
 import asyncpg
 import nats
 from datetime import datetime, timezone
+import sys
+sys.path.append('/home/krow/aegis/services')
+from utils import connect_with_retry, run_with_retry
 
 logging.basicConfig(level=logging.INFO, format='[intelligence] %(message)s')
 log = logging.getLogger(__name__)
@@ -67,11 +70,8 @@ async def lookup_whois(host: str) -> dict:
 
 async def store_finding(conn, scan_id: str, asset_id: str, cve: dict, original_title: str):
     severity_map = {
-        "critical": "critical",
-        "high": "high",
-        "medium": "medium",
-        "low": "low",
-        "unknown": "info"
+        "critical": "critical", "high": "high",
+        "medium": "medium", "low": "low", "unknown": "info"
     }
     severity = severity_map.get(cve["severity"], "info")
     title = f"{cve['cve_id']} détecté — {original_title}"
@@ -79,17 +79,9 @@ async def store_finding(conn, scan_id: str, asset_id: str, cve: dict, original_t
         INSERT INTO findings (asset_id, scan_id, source, type, title, description, severity, confidence, status, discovered_at, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     """,
-        asset_id,
-        scan_id,
-        "intelligence",
-        "vulnerability",
-        title,
-        cve["description"],
-        severity,
-        0.80,
-        "open",
-        datetime.now(timezone.utc),
-        json.dumps(cve)
+        asset_id, scan_id, "intelligence", "vulnerability",
+        title, cve["description"], severity, 0.80, "open",
+        datetime.now(timezone.utc), json.dumps(cve)
     )
     log.info(f"CVE stockée : {title} [{severity}]")
 
@@ -100,13 +92,19 @@ async def handle_intelligence_request(msg):
     host = data.get("host")
     service = data.get("service")
     version = data.get("version")
+
     log.info(f"Enrichissement — {host} {service} {version}")
-    conn = await asyncpg.connect(DB_URL)
+
+    async def db_connect():
+        return await asyncpg.connect(DB_URL)
+
+    conn = await connect_with_retry(db_connect, "PostgreSQL")
     try:
         cves = await lookup_cve(service, version)
         log.info(f"{len(cves)} CVE(s) trouvée(s) pour {service} {version}")
         for cve in cves:
-            await store_finding(conn, scan_id, asset_id, cve, f"{service} {version}")
+            await run_with_retry(store_finding, conn, scan_id, asset_id, cve, f"{service} {version}")
+
         whois_data = await lookup_whois(host)
         if whois_data:
             await conn.execute("""
@@ -118,10 +116,14 @@ async def handle_intelligence_request(msg):
 
 async def main():
     log.info("Démarrage")
-    nc = await nats.connect(NATS_URL)
-    log.info("NATS connecté")
+
+    async def nats_connect():
+        return await nats.connect(NATS_URL)
+
+    nc = await connect_with_retry(nats_connect, "NATS")
     await nc.subscribe("aegis.intelligence.enrich", cb=handle_intelligence_request)
     log.info("En attente de tâches sur aegis.intelligence.enrich")
+
     while True:
         await asyncio.sleep(1)
 
