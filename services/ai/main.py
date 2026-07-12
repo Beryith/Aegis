@@ -195,9 +195,112 @@ def get_provider(config: dict) -> AIProvider:
     log.info(f"Provider actif : {provider_name}")
     return cls(provider_config)
 
+async def generate_one_recommendation(conn, provider: AIProvider, scan_id: str,
+                                        title: str, findings: list) -> dict:
+    """Génère une recommandation IA à partir d'une liste de findings ciblée."""
+    findings_text = ""
+    findings_summary = []
+    for f in findings:
+        line = f"- [{f['severity'].upper()}] {f['title']} (source: {f['source']}, host: {f['host']})"
+        if f['description']:
+            line += f"\n  Détail: {f['description'][:200]}"
+        findings_text += line + "\n"
+        findings_summary.append({"title": f['title'], "severity": f['severity']})
+
+    prompt = f"""Tu es un expert en cybersécurité. Voici un groupe de résultats de scan liés entre eux (même thème de risque) :
+
+{findings_text}
+
+Réponds en français. Fournis une analyse structurée avec exactement ce format JSON et rien d'autre :
+{{
+  "priority": "immediate|short_term|medium_term|long_term",
+  "title": "titre court de la recommandation principale",
+  "context": "explication claire du risque en 2-3 phrases",
+  "action": "liste des actions concrètes à entreprendre",
+  "impact": "impact si rien n'est fait",
+  "effort": "low|medium|high"
+}}"""
+
+    response = await provider.generate(prompt)
+    if not response:
+        log.error(f"Pas de réponse du provider pour le groupe : {title}")
+        return None
+
+    try:
+        start = response.find("{")
+        end = response.rfind("}") + 1
+        if start == -1 or end == 0:
+            log.error(f"Pas de JSON trouvé pour {title} : {response[:200]}")
+            return None
+
+        rec = json.loads(response[start:end])
+
+        await run_with_retry(conn.execute, """
+            INSERT INTO recommendations (scan_id, priority, title, findings_summary, recommendation, generated_by, generated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+            scan_id,
+            rec.get("priority", "medium_term"),
+            rec.get("title", title),
+            json.dumps(findings_summary),
+            json.dumps({
+                "context": rec.get("context", ""),
+                "action": rec.get("action", ""),
+                "impact": rec.get("impact", ""),
+                "effort": rec.get("effort", "medium")
+            }),
+            "ai_layer",
+            datetime.now(timezone.utc)
+        )
+        log.info(f"Recommandation stockée : {rec.get('title')} [{rec.get('priority')}]")
+        return rec
+    except json.JSONDecodeError as e:
+        log.error(f"Erreur parsing JSON pour {title} : {e}")
+        return None
+
+
 async def generate_recommendation(scan_id: str, conn, provider: AIProvider):
     log.info(f"Génération pour le scan {scan_id}")
 
+    # Récupère les groupes de corrélation identifiés par le Correlation Engine
+    correlations = await conn.fetch("""
+        SELECT id, title, metadata
+        FROM findings
+        WHERE scan_id = $1 AND source = 'correlation'
+        ORDER BY
+            CASE severity
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                WHEN 'low' THEN 4
+                ELSE 5
+            END
+    """, scan_id)
+
+    if correlations:
+        log.info(f"{len(correlations)} groupe(s) de corrélation trouvé(s) — génération de recommandations ciblées")
+
+        for corr in correlations:
+            meta = corr["metadata"] if isinstance(corr["metadata"], dict) else json.loads(corr["metadata"] or "{}")
+            related_ids = meta.get("correlated_findings", [])
+
+            if not related_ids:
+                continue
+
+            findings = await conn.fetch("""
+                SELECT f.title, f.severity, f.source, f.description, a.value as host
+                FROM findings f
+                JOIN assets a ON f.asset_id = a.id
+                WHERE f.id = ANY($1::uuid[])
+            """, related_ids)
+
+            if findings:
+                await generate_one_recommendation(conn, provider, scan_id, corr["title"], findings)
+
+        return
+
+    # Fallback — aucune corrélation trouvée, on analyse tous les findings ensemble
+    log.info("Aucune corrélation trouvée — génération d'une recommandation globale")
     findings = await conn.fetch("""
         SELECT f.title, f.severity, f.source, f.description, a.value as host
         FROM findings f
@@ -217,67 +320,8 @@ async def generate_recommendation(scan_id: str, conn, provider: AIProvider):
         log.info("Aucun finding à analyser")
         return
 
-    findings_text = ""
-    findings_summary = []
-    for f in findings:
-        line = f"- [{f['severity'].upper()}] {f['title']} (source: {f['source']}, host: {f['host']})"
-        if f['description']:
-            line += f"\n  Détail: {f['description'][:200]}"
-        findings_text += line + "\n"
-        findings_summary.append({"title": f['title'], "severity": f['severity']})
+    await generate_one_recommendation(conn, provider, scan_id, "Analyse globale", findings)
 
-    prompt = f"""Tu es un expert en cybersécurité. Voici les résultats d'un scan de sécurité :
-
-{findings_text}
-
-Réponds en français. Fournis une analyse structurée avec exactement ce format JSON et rien d'autre :
-{{
-  "priority": "immediate|short_term|medium_term|long_term",
-  "title": "titre court de la recommandation principale",
-  "context": "explication claire du risque en 2-3 phrases",
-  "action": "liste des actions concrètes à entreprendre",
-  "impact": "impact si rien n'est fait",
-  "effort": "low|medium|high"
-}}"""
-
-    log.info("Envoi au provider...")
-    response = await provider.generate(prompt)
-
-    if not response:
-        log.error("Pas de réponse du provider")
-        return
-
-    try:
-        start = response.find("{")
-        end = response.rfind("}") + 1
-        if start == -1 or end == 0:
-            log.error(f"Pas de JSON trouvé : {response[:200]}")
-            return
-
-        rec = json.loads(response[start:end])
-
-        await run_with_retry(conn.execute, """
-            INSERT INTO recommendations (scan_id, priority, title, findings_summary, recommendation, generated_by, generated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-        """,
-            scan_id,
-            rec.get("priority", "medium_term"),
-            rec.get("title", "Recommandation de sécurité"),
-            json.dumps(findings_summary),
-            json.dumps({
-                "context": rec.get("context", ""),
-                "action": rec.get("action", ""),
-                "impact": rec.get("impact", ""),
-                "effort": rec.get("effort", "medium")
-            }),
-            "ai_layer",
-            datetime.now(timezone.utc)
-        )
-        log.info(f"Recommandation stockée : {rec.get('title')} [{rec.get('priority')}]")
-
-    except json.JSONDecodeError as e:
-        log.error(f"Erreur parsing JSON : {e}")
-        log.error(f"Réponse brute : {response[:300]}")
 
 async def handle_ai_request(msg):
     data = json.loads(msg.data.decode())
