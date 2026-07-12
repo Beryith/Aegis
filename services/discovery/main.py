@@ -24,7 +24,7 @@ health = HealthServer("discovery", HEALTH_PORT)
 async def scan_target(target: str) -> list:
     log.info(f"Scan de {target}")
     nm = nmap.PortScanner()
-    nm.scan(target, arguments="-sV --open -T4")
+    nm.scan(target, arguments="-sV --open -T4 -Pn")
 
     findings = []
     for host in nm.all_hosts():

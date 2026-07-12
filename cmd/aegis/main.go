@@ -164,10 +164,16 @@ func countTotalFindings(db *sql.DB, scanID string) int {
 }
 
 func waitForCompletion(db *sql.DB, scanID string) {
-	baseTimeout := getProviderTimeout()
+	providerTimeout := getProviderTimeout()
 
-	// Petite marge de sécurité une fois qu'on connaît le volume de findings
-	// (recalculée après la phase Discovery, cf boucle plus bas)
+	// Plancher minimum pour la phase réseau (Discovery), indépendant du provider IA.
+	// Un scan Nmap sur une cible filtrée/protégée peut à lui seul dépasser 100s.
+	const discoveryFloor = 240
+	baseTimeout := providerTimeout
+	if baseTimeout < discoveryFloor {
+		baseTimeout = discoveryFloor
+	}
+
 	maxWait := baseTimeout
 	elapsed := 0
 	interval := 2
