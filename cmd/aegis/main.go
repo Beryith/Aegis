@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 )
 
@@ -53,6 +55,28 @@ func cmdScan() {
 
 	scanID := uuid.New().String()
 
+	// Créer le scan en base
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	scope, _ := json.Marshal(map[string]interface{}{
+		"targets":       []string{target},
+		"excluded":      []string{},
+		"authorized_by": "cli",
+	})
+
+	_, err = db.Exec(`
+		INSERT INTO scans (id, status, profile, scope, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, scanID, "running", "active", string(scope), time.Now())
+	if err != nil {
+		log.Fatalf("Erreur création scan : %v", err)
+	}
+
+	// Publier sur NATS
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		log.Fatalf("Erreur NATS : %v", err)
@@ -75,5 +99,40 @@ func cmdScan() {
 }
 
 func cmdResults() {
-	fmt.Println("→ Commande 'results' — disponible à l'Étape 10")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT f.title, f.severity, f.status, a.value, f.discovered_at
+		FROM findings f
+		JOIN assets a ON f.asset_id = a.id
+		ORDER BY f.discovered_at DESC
+		LIMIT 50
+	`)
+	if err != nil {
+		log.Fatalf("Erreur requête : %v", err)
+	}
+	defer rows.Close()
+
+	fmt.Println("\n=== AegiS — Findings ===\n")
+	count := 0
+	for rows.Next() {
+		var title, severity, status, asset string
+		var discoveredAt time.Time
+		rows.Scan(&title, &severity, &status, &asset, &discoveredAt)
+		fmt.Printf("[%s] %s\n", severity, title)
+		fmt.Printf("  Asset    : %s\n", asset)
+		fmt.Printf("  Statut   : %s\n", status)
+		fmt.Printf("  Détecté  : %s\n\n", discoveredAt.Format("2006-01-02 15:04:05"))
+		count++
+	}
+
+	if count == 0 {
+		fmt.Println("Aucun finding trouvé.")
+	} else {
+		fmt.Printf("Total : %d finding(s)\n", count)
+	}
 }
