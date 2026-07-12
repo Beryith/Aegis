@@ -12,6 +12,8 @@ log = logging.getLogger(__name__)
 DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
 NATS_URL = "nats://aegis:aegis@localhost:4222"
 
+nc = None
+
 async def scan_target(target: str) -> list:
     log.info(f"Scan de {target}")
     nm = nmap.PortScanner()
@@ -82,10 +84,23 @@ async def handle_scan_request(msg):
             asset_id = await store_asset(conn, finding["host"])
             await store_finding(conn, scan_id, asset_id, finding)
 
+            # Publier vers l'Intelligence Service
+            if finding.get("service") and finding.get("version"):
+                payload = json.dumps({
+                    "scan_id": scan_id,
+                    "asset_id": asset_id,
+                    "host": finding["host"],
+                    "service": finding["service"],
+                    "version": finding["version"],
+                }).encode()
+                await nc.publish("aegis.intelligence.enrich", payload)
+                log.info(f"Envoyé à intelligence : {finding['service']} {finding['version']}")
+
     finally:
         await conn.close()
 
 async def main():
+    global nc
     log.info("Démarrage")
     nc = await nats.connect(NATS_URL)
     log.info("NATS connecté")
