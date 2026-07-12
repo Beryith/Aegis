@@ -1,0 +1,313 @@
+import asyncio
+import json
+import logging
+import os
+import aiohttp
+import asyncpg
+import nats
+from datetime import datetime, timezone
+from abc import ABC, abstractmethod
+
+logging.basicConfig(level=logging.INFO, format='[ai] %(message)s')
+log = logging.getLogger(__name__)
+
+DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
+NATS_URL = "nats://aegis:aegis@localhost:4222"
+CONFIG_PATH = os.path.expanduser("~/.aegis/config.json")
+
+# ─── Providers ────────────────────────────────────────────
+
+class AIProvider(ABC):
+    @abstractmethod
+    async def generate(self, prompt: str) -> str:
+        pass
+
+class OllamaProvider(AIProvider):
+    def __init__(self, config: dict):
+        self.url = config.get("url", "http://localhost:11434")
+        self.model = config.get("model", "mistral")
+
+    async def generate(self, prompt: str) -> str:
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {"model": self.model, "prompt": prompt, "stream": False}
+                async with session.post(
+                    f"{self.url}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=600)
+                ) as resp:
+                    if resp.status != 200:
+                        log.error(f"Ollama erreur HTTP {resp.status}")
+                        return ""
+                    data = await resp.json()
+                    return data.get("response", "").strip()
+        except Exception as e:
+            log.error(f"Erreur Ollama : {e}")
+            return ""
+
+class GroqProvider(AIProvider):
+    def __init__(self, config: dict):
+        self.api_key = config.get("api_key", "")
+        self.model = config.get("model", "mixtral-8x7b-32768")
+
+    async def generate(self, prompt: str) -> str:
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1000
+                }
+                async with session.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.error(f"Groq erreur HTTP {resp.status}")
+                        return ""
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            log.error(f"Erreur Groq : {e}")
+            return ""
+
+class GeminiProvider(AIProvider):
+    def __init__(self, config: dict):
+        self.api_key = config.get("api_key", "")
+        self.model = config.get("model", "gemini-1.5-flash")
+
+    async def generate(self, prompt: str) -> str:
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+                payload = {"contents": [{"parts": [{"text": prompt}]}]}
+                async with session.post(
+                    url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.error(f"Gemini erreur HTTP {resp.status}")
+                        return ""
+                    data = await resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            log.error(f"Erreur Gemini : {e}")
+            return ""
+
+class OpenAIProvider(AIProvider):
+    def __init__(self, config: dict):
+        self.api_key = config.get("api_key", "")
+        self.model = config.get("model", "gpt-4o-mini")
+
+    async def generate(self, prompt: str) -> str:
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1000
+                }
+                async with session.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.error(f"OpenAI erreur HTTP {resp.status}")
+                        return ""
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            log.error(f"Erreur OpenAI : {e}")
+            return ""
+
+class AnthropicProvider(AIProvider):
+    def __init__(self, config: dict):
+        self.api_key = config.get("api_key", "")
+        self.model = config.get("model", "claude-haiku-4-5-20251001")
+
+    async def generate(self, prompt: str) -> str:
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": self.model,
+                    "max_tokens": 1000,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+                async with session.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.error(f"Anthropic erreur HTTP {resp.status}")
+                        return ""
+                    data = await resp.json()
+                    return data["content"][0]["text"].strip()
+        except Exception as e:
+            log.error(f"Erreur Anthropic : {e}")
+            return ""
+
+# ─── Config ───────────────────────────────────────────────
+
+def load_config() -> dict:
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        log.error(f"Erreur chargement config : {e}")
+        return {"ai": {"provider": "ollama", "providers": {"ollama": {"url": "http://localhost:11434", "model": "mistral"}}}}
+
+def get_provider(config: dict) -> AIProvider:
+    ai_config = config.get("ai", {})
+    provider_name = ai_config.get("provider", "ollama")
+    providers_config = ai_config.get("providers", {})
+    provider_config = providers_config.get(provider_name, {})
+
+    providers = {
+        "ollama": OllamaProvider,
+        "groq": GroqProvider,
+        "gemini": GeminiProvider,
+        "openai": OpenAIProvider,
+        "anthropic": AnthropicProvider,
+    }
+
+    cls = providers.get(provider_name, OllamaProvider)
+    log.info(f"Provider actif : {provider_name}")
+    return cls(provider_config)
+
+# ─── Core ─────────────────────────────────────────────────
+
+async def generate_recommendation(scan_id: str, conn, provider: AIProvider):
+    log.info(f"Génération pour le scan {scan_id}")
+
+    findings = await conn.fetch("""
+        SELECT f.title, f.severity, f.source, f.description, a.value as host
+        FROM findings f
+        JOIN assets a ON f.asset_id = a.id
+        WHERE f.scan_id = $1
+        ORDER BY
+            CASE f.severity
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                WHEN 'low' THEN 4
+                ELSE 5
+            END
+    """, scan_id)
+
+    if not findings:
+        log.info("Aucun finding à analyser")
+        return
+
+    findings_text = ""
+    findings_summary = []
+    for f in findings:
+        line = f"- [{f['severity'].upper()}] {f['title']} (source: {f['source']}, host: {f['host']})"
+        if f['description']:
+            line += f"\n  Détail: {f['description'][:200]}"
+        findings_text += line + "\n"
+        findings_summary.append({"title": f['title'], "severity": f['severity']})
+
+    prompt = f"""Tu es un expert en cybersécurité. Voici les résultats d'un scan de sécurité :
+
+{findings_text}
+
+Réponds en français. Fournis une analyse structurée avec exactement ce format JSON et rien d'autre :
+{{
+  "priority": "immediate|short_term|medium_term|long_term",
+  "title": "titre court de la recommandation principale",
+  "context": "explication claire du risque en 2-3 phrases",
+  "action": "liste des actions concrètes à entreprendre",
+  "impact": "impact si rien n'est fait",
+  "effort": "low|medium|high"
+}}"""
+
+    log.info("Envoi au provider...")
+    response = await provider.generate(prompt)
+
+    if not response:
+        log.error("Pas de réponse du provider")
+        return
+
+    try:
+        start = response.find("{")
+        end = response.rfind("}") + 1
+        if start == -1 or end == 0:
+            log.error(f"Pas de JSON trouvé : {response[:200]}")
+            return
+
+        rec = json.loads(response[start:end])
+
+        await conn.execute("""
+            INSERT INTO recommendations (scan_id, priority, title, findings_summary, recommendation, generated_by, generated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+            scan_id,
+            rec.get("priority", "medium_term"),
+            rec.get("title", "Recommandation de sécurité"),
+            json.dumps(findings_summary),
+            json.dumps({
+                "context": rec.get("context", ""),
+                "action": rec.get("action", ""),
+                "impact": rec.get("impact", ""),
+                "effort": rec.get("effort", "medium")
+            }),
+            "ai_layer",
+            datetime.now(timezone.utc)
+        )
+        log.info(f"Recommandation stockée : {rec.get('title')} [{rec.get('priority')}]")
+
+    except json.JSONDecodeError as e:
+        log.error(f"Erreur parsing JSON : {e}")
+        log.error(f"Réponse brute : {response[:300]}")
+
+async def handle_ai_request(msg):
+    data = json.loads(msg.data.decode())
+    scan_id = data.get("scan_id")
+    log.info(f"Tâche reçue — scan_id={scan_id}")
+
+    config = load_config()
+    provider = get_provider(config)
+
+    conn = await asyncpg.connect(DB_URL)
+    try:
+        await generate_recommendation(scan_id, conn, provider)
+    finally:
+        await conn.close()
+
+async def main():
+    log.info("Démarrage")
+    config = load_config()
+    provider_name = config.get("ai", {}).get("provider", "ollama")
+
+    nc = await nats.connect(NATS_URL)
+    log.info("NATS connecté")
+    log.info(f"Provider actif : {provider_name}")
+
+    await nc.subscribe("aegis.ai.analyze", cb=handle_ai_request)
+    log.info("En attente de tâches sur aegis.ai.analyze")
+
+    while True:
+        await asyncio.sleep(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())

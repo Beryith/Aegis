@@ -33,6 +33,8 @@ func main() {
 		cmdResults()
 	case "report":
 		cmdReport()
+	case "ai":
+		cmdAI()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -48,6 +50,9 @@ func printUsage() {
 	fmt.Println("  aegis results --page <n°>")
 	fmt.Println("  aegis report --last")
 	fmt.Println("  aegis report --scan <n°>")
+	fmt.Println("  aegis ai status")
+	fmt.Println("  aegis ai use <provider>")
+	fmt.Println("  aegis ai config <provider> --key <clé>")
 }
 
 func getArg(name string) string {
@@ -279,6 +284,8 @@ func printReport(db *sql.DB, scanID string) {
 
 	fmt.Println("────────────────────────────────────────")
 	fmt.Printf("Total : %d finding(s)\n\n", totalFindings)
+
+	printRecommendations(db, scanID)
 }
 
 func cmdReport() {
@@ -319,4 +326,228 @@ func cmdReport() {
 	}
 
 	printReport(db, scanID)
+}
+
+func printRecommendations(db *sql.DB, scanID string) {
+	rows, err := db.Query(`
+		SELECT title, priority, findings_summary, recommendation, generated_at
+		FROM recommendations
+		WHERE scan_id = $1
+		ORDER BY generated_at DESC
+	`, scanID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	priorities := map[string]string{
+		"immediate":   "🚨 IMMÉDIAT",
+		"short_term":  "⚡ COURT TERME",
+		"medium_term": "📅 MOYEN TERME",
+		"long_term":   "🔭 LONG TERME",
+	}
+
+	hasRec := false
+	for rows.Next() {
+		if !hasRec {
+			fmt.Println("\n╔══════════════════════════════════════╗")
+			fmt.Println("║      AegiS — Recommandations IA      ║")
+			fmt.Println("╚══════════════════════════════════════╝")
+			hasRec = true
+		}
+
+		var title, priority, findingsSummaryStr, recommendationStr string
+		var generatedAt time.Time
+		rows.Scan(&title, &priority, &findingsSummaryStr, &recommendationStr, &generatedAt)
+
+		var rec map[string]string
+		json.Unmarshal([]byte(recommendationStr), &rec)
+
+		label := priorities[priority]
+		if label == "" {
+			label = priority
+		}
+
+		fmt.Printf("\n%s\n", label)
+		fmt.Printf("  %s\n", title)
+		fmt.Println("────────────────────────────────────────")
+
+		if rec["context"] != "" {
+			fmt.Printf("  Contexte : %s\n\n", rec["context"])
+		}
+		if rec["action"] != "" {
+			fmt.Printf("  Action   : %s\n\n", rec["action"])
+		}
+		if rec["impact"] != "" {
+			fmt.Printf("  Impact   : %s\n\n", rec["impact"])
+		}
+		if rec["effort"] != "" {
+			fmt.Printf("  Effort   : %s\n", rec["effort"])
+		}
+		fmt.Printf("  Généré   : %s\n", generatedAt.Format("2006-01-02 15:04:05"))
+	}
+}
+
+func cmdAI() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage:")
+		fmt.Println("  aegis ai status")
+		fmt.Println("  aegis ai use <provider>")
+		fmt.Println("  aegis ai config <provider> --key <clé>")
+		return
+	}
+
+	switch os.Args[2] {
+	case "status":
+		cmdAIStatus()
+	case "use":
+		cmdAIUse()
+	case "config":
+		cmdAIConfig()
+	default:
+		fmt.Println("Commande inconnue")
+	}
+}
+
+func loadAegisConfig() map[string]interface{} {
+	home, _ := os.UserHomeDir()
+	path := home + "/.aegis/config.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]interface{}{}
+	}
+	var config map[string]interface{}
+	json.Unmarshal(data, &config)
+	return config
+}
+
+func saveAegisConfig(config map[string]interface{}) {
+	home, _ := os.UserHomeDir()
+	path := home + "/.aegis/config.json"
+	data, _ := json.MarshalIndent(config, "", "  ")
+	os.WriteFile(path, data, 0600)
+}
+
+func cmdAIStatus() {
+	config := loadAegisConfig()
+	ai := config["ai"].(map[string]interface{})
+	active := ai["provider"].(string)
+	providers := ai["providers"].(map[string]interface{})
+
+	descriptions := map[string]string{
+		"ollama":    "local       — aucune donnée externe",
+		"groq":      "rapide      — données envoyées à Groq",
+		"gemini":    "rapide      — données envoyées à Google",
+		"openai":    "très rapide — données envoyées à OpenAI",
+		"anthropic": "très rapide — données envoyées à Anthropic",
+	}
+
+	fmt.Println("\n=== AegiS — Providers IA ===\n")
+	for _, name := range []string{"ollama", "groq", "gemini", "openai", "anthropic"} {
+		marker := "○"
+		activeLabel := ""
+		keyStatus := ""
+
+		if name == active {
+			marker = "✓"
+			activeLabel = "[ACTIF] "
+		}
+
+		if name == "ollama" {
+			keyStatus = "[disponible]   "
+		} else {
+			p, ok := providers[name].(map[string]interface{})
+			if ok {
+				key, _ := p["api_key"].(string)
+				if key != "" {
+					keyStatus = "[clé configurée]"
+				} else {
+					keyStatus = "[clé manquante] "
+				}
+			}
+		}
+
+		fmt.Printf("  %s %-10s %s %s  %s\n",
+			marker, name, activeLabel, keyStatus, descriptions[name])
+	}
+
+	fmt.Println("\n→ aegis ai use <provider>              changer de provider")
+	fmt.Println("→ aegis ai config <provider> --key <clé>  configurer une clé API")
+}
+
+func cmdAIUse() {
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: aegis ai use <provider>")
+		return
+	}
+
+	provider := os.Args[3]
+	validProviders := []string{"ollama", "groq", "gemini", "openai", "anthropic"}
+	valid := false
+	for _, p := range validProviders {
+		if p == provider {
+			valid = true
+			break
+		}
+	}
+
+	if !valid {
+		fmt.Printf("Provider inconnu : %s\n", provider)
+		fmt.Printf("Providers disponibles : %v\n", validProviders)
+		return
+	}
+
+	// Avertissement pour les providers externes
+	if provider != "ollama" {
+		fmt.Printf("\n⚠️  Attention — Provider externe sélectionné\n")
+		fmt.Printf("   Les findings de vos scans seront envoyés à %s.\n", provider)
+		fmt.Printf("   Assurez-vous que cela est conforme à votre politique de confidentialité.\n")
+		fmt.Printf("   Confirmer ? [o/N] ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if confirm != "o" && confirm != "O" {
+			fmt.Println("Annulé.")
+			return
+		}
+	}
+
+	config := loadAegisConfig()
+	ai := config["ai"].(map[string]interface{})
+	ai["provider"] = provider
+	config["ai"] = ai
+	saveAegisConfig(config)
+
+	fmt.Printf("✓ Provider actif : %s\n", provider)
+	if provider == "ollama" {
+		fmt.Println("  Aucune donnée ne quitte votre infrastructure.")
+	} else {
+		fmt.Printf("  Redémarre le service AI pour appliquer le changement.\n")
+	}
+}
+
+func cmdAIConfig() {
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: aegis ai config <provider> --key <clé>")
+		return
+	}
+
+	provider := os.Args[3]
+	key := getArg("--key")
+
+	if key == "" {
+		fmt.Println("Erreur : --key requis")
+		return
+	}
+
+	config := loadAegisConfig()
+	ai := config["ai"].(map[string]interface{})
+	providers := ai["providers"].(map[string]interface{})
+	p := providers[provider].(map[string]interface{})
+	p["api_key"] = key
+	providers[provider] = p
+	ai["providers"] = providers
+	config["ai"] = ai
+	saveAegisConfig(config)
+
+	fmt.Printf("✓ Clé API configurée pour %s\n", provider)
 }
