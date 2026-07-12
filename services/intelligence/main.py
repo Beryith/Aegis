@@ -13,6 +13,7 @@ from utils import connect_with_retry, run_with_retry
 from logger import get_logger
 from health import HealthServer
 from cpe_mapper import build_cpe_match_string, extract_version
+from update_exploitdb import fetch_csv, index_exploits
 
 nc = None
 
@@ -209,6 +210,32 @@ async def handle_intelligence_request(msg):
     finally:
         await conn.close()
 
+async def handle_update_exploitdb_request(msg):
+    log.info("Demande de mise à jour exploit-db reçue")
+
+    async def db_connect():
+        return await asyncpg.connect(DB_URL)
+
+    conn = await connect_with_retry(db_connect, "PostgreSQL")
+    try:
+        csv_text = await fetch_csv()
+        await index_exploits(csv_text, conn)
+
+        row = await conn.fetchrow("SELECT last_updated, total_entries FROM exploit_db_meta WHERE id = 1")
+        response = {
+            "success": True,
+            "total_entries": row["total_entries"],
+            "last_updated": row["last_updated"].isoformat()
+        }
+        log.info(f"Base exploit-db mise à jour : {row['total_entries']} entrées")
+    except Exception as e:
+        log.error(f"Erreur mise à jour exploit-db : {e}")
+        response = {"success": False, "error": str(e)}
+    finally:
+        await conn.close()
+
+    await msg.respond(json.dumps(response).encode())
+
 async def main():
     log.info("Démarrage")
 
@@ -221,6 +248,7 @@ async def main():
     health.set_check("nats", True)
 
     await nc.subscribe("aegis.intelligence.enrich", cb=handle_intelligence_request)
+    await nc.subscribe("aegis.intel.update_exploitdb", cb=handle_update_exploitdb_request)
     log.info("En attente de tâches sur aegis.intelligence.enrich")
 
     health.set_ready()

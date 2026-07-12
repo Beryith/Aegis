@@ -35,6 +35,8 @@ func main() {
 		cmdReport()
 	case "ai":
 		cmdAI()
+	case "intel":
+		cmdIntel()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -53,6 +55,7 @@ func printUsage() {
 	fmt.Println("  aegis ai status")
 	fmt.Println("  aegis ai use <provider>")
 	fmt.Println("  aegis ai config <provider> --key <clé>")
+	fmt.Println("  aegis intel update-exploitdb")
 }
 
 func getArg(name string) string {
@@ -672,4 +675,56 @@ func cmdAIConfig() {
 	saveAegisConfig(config)
 
 	fmt.Printf("✓ Clé API configurée pour %s\n", provider)
+}
+
+func cmdIntel() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage:")
+		fmt.Println("  aegis intel update-exploitdb")
+		return
+	}
+
+	switch os.Args[2] {
+	case "update-exploitdb":
+		cmdUpdateExploitDB()
+	default:
+		fmt.Println("Commande inconnue")
+	}
+}
+
+func cmdUpdateExploitDB() {
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		log.Fatalf("Erreur NATS : %v", err)
+	}
+	defer nc.Close()
+
+	fmt.Println("⏳ Mise à jour de la base exploit-db en cours...")
+	fmt.Println("   (téléchargement + indexation, peut prendre 15-30 secondes)")
+
+	msg, err := nc.Request("aegis.intel.update_exploitdb", []byte("{}"), 60*time.Second)
+	if err != nil {
+		log.Fatalf("Erreur : délai dépassé ou service indisponible — %v", err)
+	}
+
+	var response struct {
+		Success      bool   `json:"success"`
+		TotalEntries int    `json:"total_entries"`
+		LastUpdated  string `json:"last_updated"`
+		Error        string `json:"error"`
+	}
+	json.Unmarshal(msg.Data, &response)
+
+	if response.Success {
+		parsedDate, err := time.Parse(time.RFC3339, response.LastUpdated)
+		dateStr := response.LastUpdated
+		if err == nil {
+			dateStr = parsedDate.Format("2006-01-02 15:04:05")
+		}
+		fmt.Printf("✓ Base exploit-db mise à jour\n")
+		fmt.Printf("  Entrées indexées : %d\n", response.TotalEntries)
+		fmt.Printf("  Date             : %s\n", dateStr)
+	} else {
+		fmt.Printf("✗ Échec de la mise à jour : %s\n", response.Error)
+	}
 }
