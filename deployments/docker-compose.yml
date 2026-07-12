@@ -1,0 +1,97 @@
+
+services:
+
+  nats:
+    image: nats:latest
+    container_name: aegis-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: >
+      --jetstream
+      --user aegis
+      --pass aegis
+      --http_port 8222
+
+
+  postgres:
+    image: postgres:17
+    container_name: aegis-postgres
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis
+      POSTGRES_DB: aegis
+    ports:
+      - "5432:5432"
+    volumes:
+      - aegis-postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  discovery:
+    build:
+      context: ..
+      dockerfile: deployments/dockerfiles/discovery.dockerfile
+    container_name: aegis-discovery
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
+      NATS_URL: nats://aegis:aegis@nats:4222
+
+  intelligence:
+    build:
+      context: ..
+      dockerfile: deployments/dockerfiles/intelligence.dockerfile
+    container_name: aegis-intelligence
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
+      NATS_URL: nats://aegis:aegis@nats:4222
+
+  correlator:
+    build:
+      context: ..
+      dockerfile: deployments/dockerfiles/correlator.dockerfile
+    container_name: aegis-correlator
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
+      NATS_URL: nats://aegis:aegis@nats:4222
+
+  ai:
+    build:
+      context: ..
+      dockerfile: deployments/dockerfiles/ai.dockerfile
+    container_name: aegis-ai
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ~/.aegis:/root/.aegis
+    environment:
+      DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
+      NATS_URL: nats://aegis:aegis@nats:4222
+
+volumes:
+  aegis-postgres-data:

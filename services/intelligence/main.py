@@ -1,21 +1,26 @@
 import asyncio
 import json
-import logging
+import os
 import aiohttp
 import whois
 import asyncpg
 import nats
 from datetime import datetime, timezone
 import sys
+sys.path.append('/app')
 sys.path.append('/home/krow/aegis/services')
 from utils import connect_with_retry, run_with_retry
+from logger import get_logger
+from health import HealthServer
 
-logging.basicConfig(level=logging.INFO, format='[intelligence] %(message)s')
-log = logging.getLogger(__name__)
+log = get_logger("intelligence")
 
-DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
-NATS_URL = "nats://aegis:aegis@localhost:4222"
+DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
+NATS_URL = os.getenv("NATS_URL", "nats://aegis:aegis@localhost:4222")
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+HEALTH_PORT = 9102
+
+health = HealthServer("intelligence", HEALTH_PORT)
 
 async def lookup_cve(service: str, version: str) -> list:
     if not service or not version:
@@ -94,6 +99,7 @@ async def handle_intelligence_request(msg):
     version = data.get("version")
 
     log.info(f"Enrichissement — {host} {service} {version}")
+    health.set_check("last_task", True, f"scan_id={scan_id}")
 
     async def db_connect():
         return await asyncpg.connect(DB_URL)
@@ -111,6 +117,9 @@ async def handle_intelligence_request(msg):
                 UPDATE assets SET metadata = metadata || $1 WHERE id = $2
             """, json.dumps({"whois": whois_data}), asset_id)
             log.info(f"WHOIS stocké pour {host}")
+    except Exception as e:
+        health.set_check("last_task", False, str(e))
+        log.error(f"Erreur enrichissement : {e}")
     finally:
         await conn.close()
 
@@ -121,8 +130,13 @@ async def main():
         return await nats.connect(NATS_URL)
 
     nc = await connect_with_retry(nats_connect, "NATS")
+    health.set_check("nats", True)
+
     await nc.subscribe("aegis.intelligence.enrich", cb=handle_intelligence_request)
     log.info("En attente de tâches sur aegis.intelligence.enrich")
+
+    health.set_ready()
+    await health.start()
 
     while True:
         await asyncio.sleep(1)

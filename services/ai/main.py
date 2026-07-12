@@ -7,6 +7,7 @@ import asyncpg
 import nats
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
+import os
 import sys
 sys.path.append('/home/krow/aegis/services')
 from utils import connect_with_retry, run_with_retry
@@ -14,8 +15,8 @@ from utils import connect_with_retry, run_with_retry
 logging.basicConfig(level=logging.INFO, format='[ai] %(message)s')
 log = logging.getLogger(__name__)
 
-DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
-NATS_URL = "nats://aegis:aegis@localhost:4222"
+DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
+NATS_URL = os.getenv("NATS_URL", "nats://aegis:aegis@localhost:4222")
 CONFIG_PATH = os.path.expanduser("~/.aegis/config.json")
 
 class AIProvider(ABC):
@@ -278,6 +279,7 @@ async def handle_ai_request(msg):
     data = json.loads(msg.data.decode())
     scan_id = data.get("scan_id")
     log.info(f"Tâche reçue — scan_id={scan_id}")
+    health.set_check("last_task", True, f"scan_id={scan_id}")
 
     config = load_config()
     provider = get_provider(config)
@@ -288,6 +290,15 @@ async def handle_ai_request(msg):
     conn = await connect_with_retry(db_connect, "PostgreSQL")
     try:
         await generate_recommendation(scan_id, conn, provider)
+
+        await conn.execute(
+            "UPDATE scans SET status = $1, completed_at = $2 WHERE id = $3",
+            "completed", datetime.now(timezone.utc), scan_id
+        )
+        log.info(f"Scan {scan_id} marqué comme terminé")
+    except Exception as e:
+        health.set_check("last_task", False, str(e))
+        log.error(f"Erreur génération recommandation : {e}")
     finally:
         await conn.close()
 
@@ -300,10 +311,14 @@ async def main():
         return await nats.connect(NATS_URL)
 
     nc = await connect_with_retry(nats_connect, "NATS")
+    health.set_check("nats", True)
     log.info(f"Provider actif : {provider_name}")
 
     await nc.subscribe("aegis.ai.analyze", cb=handle_ai_request)
     log.info("En attente de tâches sur aegis.ai.analyze")
+
+    health.set_ready()
+    await health.start()
 
     while True:
         await asyncio.sleep(1)

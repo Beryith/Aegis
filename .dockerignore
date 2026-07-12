@@ -1,0 +1,8 @@
+.git
+*.out
+aegis
+gateway
+orchestrator
+**/__pycache__
+**/*.pyc
+**/venv

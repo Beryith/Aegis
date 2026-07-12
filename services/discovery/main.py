@@ -1,21 +1,25 @@
 import asyncio
 import json
-import logging
+import os
 import nmap
 import asyncpg
 import nats
 from datetime import datetime, timezone
 import sys
+sys.path.append('/app')
 sys.path.append('/home/krow/aegis/services')
 from utils import connect_with_retry, run_with_retry
+from logger import get_logger
+from health import HealthServer
 
-logging.basicConfig(level=logging.INFO, format='[discovery] %(message)s')
-log = logging.getLogger(__name__)
+log = get_logger("discovery")
 
-DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
-NATS_URL = "nats://aegis:aegis@localhost:4222"
+DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
+NATS_URL = os.getenv("NATS_URL", "nats://aegis:aegis@localhost:4222")
+HEALTH_PORT = 9101
 
 nc = None
+health = HealthServer("discovery", HEALTH_PORT)
 
 async def scan_target(target: str) -> list:
     log.info(f"Scan de {target}")
@@ -67,6 +71,7 @@ async def handle_scan_request(msg):
     target = data.get("target")
 
     log.info(f"Tâche reçue — scan_id={scan_id} target={target}")
+    health.set_check("last_task", True, f"scan_id={scan_id}")
 
     async def db_connect():
         return await asyncpg.connect(DB_URL)
@@ -90,6 +95,13 @@ async def handle_scan_request(msg):
                 }).encode()
                 await nc.publish("aegis.intelligence.enrich", payload)
                 log.info(f"Envoyé à intelligence : {finding['service']} {finding['version']}")
+
+        await nc.publish("aegis.correlation.run", json.dumps({"scan_id": scan_id}).encode())
+        log.info(f"Corrélation déclenchée pour le scan {scan_id}")
+
+    except Exception as e:
+        health.set_check("last_task", False, str(e))
+        log.error(f"Erreur traitement scan {scan_id} : {e}")
     finally:
         await conn.close()
 
@@ -102,8 +114,13 @@ async def main():
         return await nats.connect(NATS_URL)
 
     nc = await connect_with_retry(nats_connect, "NATS")
+    health.set_check("nats", True)
+
     await nc.subscribe("aegis.discovery.scan", cb=handle_scan_request)
     log.info("En attente de tâches sur aegis.discovery.scan")
+
+    health.set_ready()
+    await health.start()
 
     while True:
         await asyncio.sleep(1)

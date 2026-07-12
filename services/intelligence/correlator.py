@@ -1,20 +1,26 @@
 import asyncio
 import json
-import logging
+import os
 import asyncpg
 import nats
 from datetime import datetime, timezone
 import sys
+sys.path.append('/app')
 sys.path.append('/home/krow/aegis/services')
 from utils import connect_with_retry, run_with_retry
+from logger import get_logger
+from health import HealthServer
 
-logging.basicConfig(level=logging.INFO, format='[correlator] %(message)s')
-log = logging.getLogger(__name__)
+log = get_logger("correlator")
 
-DB_URL = "postgresql://aegis:aegis@127.0.0.1:5432/aegis"
-NATS_URL = "nats://aegis:aegis@localhost:4222"
+DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
+NATS_URL = os.getenv("NATS_URL", "nats://aegis:aegis@localhost:4222")
+HEALTH_PORT = 9103
 
 ADMIN_SERVICES = ["ssh", "rdp", "telnet", "ftp", "vnc", "mysql", "postgresql", "mongodb"]
+
+nc = None
+health = HealthServer("correlator", HEALTH_PORT)
 
 async def correlate(scan_id: str, conn):
     log.info(f"Corrélation du scan {scan_id}")
@@ -47,7 +53,6 @@ async def correlate(scan_id: str, conn):
         open_ports = [f for f in findings_list if f["type"] == "open_port"]
         vulnerabilities = [f for f in findings_list if f["type"] == "vulnerability"]
 
-        # Règle 1 — Port ouvert + CVE trouvée
         if open_ports and vulnerabilities:
             correlations.append({
                 "asset_id": asset_id,
@@ -58,7 +63,6 @@ async def correlate(scan_id: str, conn):
                 "finding_ids": [f["id"] for f in open_ports + vulnerabilities]
             })
 
-        # Règle 2 — Service d'administration exposé
         admin_ports = []
         for f in open_ports:
             meta = f["metadata"] if isinstance(f["metadata"], dict) else json.loads(f["metadata"] or "{}")
@@ -77,7 +81,6 @@ async def correlate(scan_id: str, conn):
                 "finding_ids": [f["id"] for f in admin_ports]
             })
 
-        # Règle 3 — Surface d'attaque élargie
         if len(open_ports) > 3:
             correlations.append({
                 "asset_id": asset_id,
@@ -106,25 +109,37 @@ async def handle_correlate_request(msg):
     data = json.loads(msg.data.decode())
     scan_id = data.get("scan_id")
 
+    health.set_check("last_task", True, f"scan_id={scan_id}")
+
     async def db_connect():
         return await asyncpg.connect(DB_URL)
 
     conn = await connect_with_retry(db_connect, "PostgreSQL")
     try:
         await correlate(scan_id, conn)
+        await nc.publish("aegis.ai.analyze", json.dumps({"scan_id": scan_id}).encode())
+        log.info(f"Analyse IA déclenchée pour le scan {scan_id}")
+    except Exception as e:
+        health.set_check("last_task", False, str(e))
+        log.error(f"Erreur corrélation : {e}")
     finally:
         await conn.close()
 
 async def main():
+    global nc
     log.info("Démarrage")
 
     async def nats_connect():
         return await nats.connect(NATS_URL)
 
-    nc = await nats.connect(NATS_URL)
     nc = await connect_with_retry(nats_connect, "NATS")
+    health.set_check("nats", True)
+
     await nc.subscribe("aegis.correlation.run", cb=handle_correlate_request)
     log.info("En attente de tâches sur aegis.correlation.run")
+
+    health.set_ready()
+    await health.start()
 
     while True:
         await asyncio.sleep(1)

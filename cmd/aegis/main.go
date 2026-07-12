@@ -120,7 +120,78 @@ func cmdScan() {
 	fmt.Printf("  Cible   : %s\n", target)
 	fmt.Printf("  Scan ID : %s\n", scanID)
 	fmt.Printf("  Heure   : %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Printf("→ Lance 'aegis report --last' pour voir le résultat\n")
+	fmt.Printf("⏳ Analyse en cours (Discovery → Intelligence → Corrélation → IA)...\n")
+
+	waitForCompletion(db, scanID)
+	printReport(db, scanID)
+}
+
+func countBySource(db *sql.DB, scanID string, source string) int {
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM findings WHERE scan_id = $1 AND source = $2", scanID, source).Scan(&count)
+	return count
+}
+
+func waitForCompletion(db *sql.DB, scanID string) {
+	maxWait := 600
+	elapsed := 0
+	interval := 2
+	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	spinIdx := 0
+
+	stages := []struct {
+		name     string
+		source   string
+		done     bool
+		label    string
+	}{
+		{"discovery", "discovery", false, "Discovery"},
+		{"intelligence", "intelligence", false, "Intelligence"},
+		{"correlation", "correlation", false, "Corrélation"},
+	}
+
+	currentStage := 0
+
+	for elapsed < maxWait {
+		var status string
+		db.QueryRow("SELECT status FROM scans WHERE id = $1", scanID).Scan(&status)
+
+		if status == "completed" {
+			fmt.Print("\r")
+			for i := range stages {
+				if !stages[i].done {
+					count := countBySource(db, scanID, stages[i].source)
+					fmt.Printf("✓ %-14s terminé  (%d finding(s))\n", stages[i].label, count)
+				}
+			}
+			fmt.Println("✓ Analyse IA    terminée")
+			fmt.Println()
+			return
+		}
+
+		// Vérifier si l'étape courante est terminée (au moins 1 finding ou temps suffisant)
+		if currentStage < len(stages) {
+			count := countBySource(db, scanID, stages[currentStage].source)
+			if count > 0 && currentStage < len(stages)-1 {
+				fmt.Printf("\r✓ %-14s terminé  (%d finding(s))                    \n", stages[currentStage].label, count)
+				stages[currentStage].done = true
+				currentStage++
+			}
+		}
+
+		label := "Analyse IA (peut prendre plusieurs minutes)"
+		if currentStage < len(stages) {
+			label = stages[currentStage].label
+		}
+
+		fmt.Printf("\r%s %-14s en cours...                    ", spinner[spinIdx], label)
+		spinIdx = (spinIdx + 1) % len(spinner)
+
+		time.Sleep(time.Duration(interval) * time.Second)
+		elapsed += interval
+	}
+
+	fmt.Println("\n⚠️  Délai dépassé — affichage des résultats partiels\n")
 }
 
 func cmdResults() {
