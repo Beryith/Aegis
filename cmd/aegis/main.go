@@ -37,6 +37,8 @@ func main() {
 		cmdAI()
 	case "intel":
 		cmdIntel()
+	case "scope":
+		cmdScope()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -56,6 +58,9 @@ func printUsage() {
 	fmt.Println("  aegis ai use <provider>")
 	fmt.Println("  aegis ai config <provider> --key <clé>")
 	fmt.Println("  aegis intel update-exploitdb")
+	fmt.Println("  aegis scope list")
+	fmt.Println("  aegis scope add <cible>")
+	fmt.Println("  aegis scope remove <cible>")
 }
 
 func getArg(name string) string {
@@ -76,10 +81,148 @@ func hasFlag(name string) bool {
 	return false
 }
 
+// ─── Scope ──────────────────────────────────────────────
+
+type ScopeConfig struct {
+	AuthorizedTargets []string `json:"authorized_targets"`
+	ExcludedTargets   []string `json:"excluded_targets"`
+}
+
+func loadScope() ScopeConfig {
+	home, _ := os.UserHomeDir()
+	path := home + "/.aegis/scope.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ScopeConfig{}
+	}
+	var scope ScopeConfig
+	json.Unmarshal(data, &scope)
+	return scope
+}
+
+func saveScope(scope ScopeConfig) {
+	home, _ := os.UserHomeDir()
+	path := home + "/.aegis/scope.json"
+	data, _ := json.MarshalIndent(scope, "", "  ")
+	os.WriteFile(path, data, 0600)
+}
+
+func isTargetInScope(scope ScopeConfig, target string) bool {
+	for _, excluded := range scope.ExcludedTargets {
+		if excluded == target {
+			return false
+		}
+	}
+	for _, authorized := range scope.AuthorizedTargets {
+		if authorized == target {
+			return true
+		}
+	}
+	return false
+}
+
+func cmdScope() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage:")
+		fmt.Println("  aegis scope list")
+		fmt.Println("  aegis scope add <cible>")
+		fmt.Println("  aegis scope remove <cible>")
+		return
+	}
+
+	switch os.Args[2] {
+	case "list":
+		cmdScopeList()
+	case "add":
+		cmdScopeAdd()
+	case "remove":
+		cmdScopeRemove()
+	default:
+		fmt.Println("Commande inconnue")
+	}
+}
+
+func cmdScopeList() {
+	scope := loadScope()
+	fmt.Println("\n=== AegiS — Périmètre autorisé ===\n")
+	if len(scope.AuthorizedTargets) == 0 {
+		fmt.Println("  Aucune cible autorisée pour le moment.")
+		fmt.Println("  → aegis scope add <cible>")
+	} else {
+		fmt.Println("Cibles autorisées :")
+		for _, t := range scope.AuthorizedTargets {
+			fmt.Printf("  ✓ %s\n", t)
+		}
+	}
+	if len(scope.ExcludedTargets) > 0 {
+		fmt.Println("\nCibles explicitement exclues :")
+		for _, t := range scope.ExcludedTargets {
+			fmt.Printf("  ✗ %s\n", t)
+		}
+	}
+}
+
+func cmdScopeAdd() {
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: aegis scope add <cible>")
+		return
+	}
+	target := os.Args[3]
+
+	scope := loadScope()
+	for _, t := range scope.AuthorizedTargets {
+		if t == target {
+			fmt.Printf("'%s' est déjà dans le périmètre autorisé.\n", target)
+			return
+		}
+	}
+
+	scope.AuthorizedTargets = append(scope.AuthorizedTargets, target)
+	saveScope(scope)
+	fmt.Printf("✓ '%s' ajouté au périmètre autorisé\n", target)
+}
+
+func cmdScopeRemove() {
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: aegis scope remove <cible>")
+		return
+	}
+	target := os.Args[3]
+
+	scope := loadScope()
+	newTargets := []string{}
+	found := false
+	for _, t := range scope.AuthorizedTargets {
+		if t == target {
+			found = true
+			continue
+		}
+		newTargets = append(newTargets, t)
+	}
+
+	if !found {
+		fmt.Printf("'%s' n'était pas dans le périmètre autorisé.\n", target)
+		return
+	}
+
+	scope.AuthorizedTargets = newTargets
+	saveScope(scope)
+	fmt.Printf("✓ '%s' retiré du périmètre autorisé\n", target)
+}
+
+// ─── Scan ───────────────────────────────────────────────
+
 func cmdScan() {
 	target := getArg("--target")
 	if target == "" {
 		log.Fatal("Erreur : --target requis")
+	}
+
+	scopeCfg := loadScope()
+	if !isTargetInScope(scopeCfg, target) {
+		fmt.Printf("✗ Refus : '%s' n'est pas dans le périmètre autorisé.\n", target)
+		fmt.Println("  → aegis scope list  pour voir les cibles autorisées")
+		os.Exit(1)
 	}
 
 	scanID := uuid.New().String()
@@ -129,11 +272,7 @@ func cmdScan() {
 	printReport(db, scanID)
 }
 
-func countBySource(db *sql.DB, scanID string, source string) int {
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM findings WHERE scan_id = $1 AND source = $2", scanID, source).Scan(&count)
-	return count
-}
+// ─── Attente / progression ──────────────────────────────
 
 func getProviderTimeout() int {
 	config := loadAegisConfig()
@@ -166,11 +305,15 @@ func countTotalFindings(db *sql.DB, scanID string) int {
 	return count
 }
 
+func countBySource(db *sql.DB, scanID string, source string) int {
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM findings WHERE scan_id = $1 AND source = $2", scanID, source).Scan(&count)
+	return count
+}
+
 func waitForCompletion(db *sql.DB, scanID string) {
 	providerTimeout := getProviderTimeout()
 
-	// Plancher minimum pour la phase réseau (Discovery), indépendant du provider IA.
-	// Un scan Nmap sur une cible filtrée/protégée peut à lui seul dépasser 100s.
 	const discoveryFloor = 240
 	baseTimeout := providerTimeout
 	if baseTimeout < discoveryFloor {
@@ -184,10 +327,10 @@ func waitForCompletion(db *sql.DB, scanID string) {
 	spinIdx := 0
 
 	stages := []struct {
-		name     string
-		source   string
-		done     bool
-		label    string
+		name   string
+		source string
+		done   bool
+		label  string
 	}{
 		{"discovery", "discovery", false, "Discovery"},
 		{"intelligence", "intelligence", false, "Intelligence"},
@@ -213,7 +356,6 @@ func waitForCompletion(db *sql.DB, scanID string) {
 			return
 		}
 
-		// Vérifier si l'étape courante est terminée (au moins 1 finding ou temps suffisant)
 		if currentStage < len(stages) {
 			count := countBySource(db, scanID, stages[currentStage].source)
 			if count > 0 && currentStage < len(stages)-1 {
@@ -221,7 +363,6 @@ func waitForCompletion(db *sql.DB, scanID string) {
 				stages[currentStage].done = true
 				currentStage++
 
-				// Recalcule le budget de temps une fois qu'on connaît le volume réel de findings
 				if stages[currentStage-1].source == "intelligence" {
 					total := countTotalFindings(db, scanID)
 					bonus := 0
@@ -248,6 +389,8 @@ func waitForCompletion(db *sql.DB, scanID string) {
 	fmt.Println("\n⚠️  Délai dépassé — affichage des résultats partiels\n")
 }
 
+// ─── Results / Report ───────────────────────────────────
+
 func cmdResults() {
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -255,7 +398,6 @@ func cmdResults() {
 	}
 	defer db.Close()
 
-	// Paramètres
 	target := getArg("--target")
 	since := getArg("--since")
 	page := 1
@@ -266,7 +408,6 @@ func cmdResults() {
 	}
 	offset := (page - 1) * pageSize
 
-	// Construction de la requête dynamique
 	query := `
 		SELECT s.id, s.status, s.profile, s.created_at,
 		       COUNT(f.id) as total,
@@ -413,46 +554,6 @@ func printReport(db *sql.DB, scanID string) {
 	printRecommendations(db, scanID)
 }
 
-func cmdReport() {
-	db, err := sql.Open("postgres", dbURL)
-	if err != nil {
-		log.Fatalf("Erreur PostgreSQL : %v", err)
-	}
-	defer db.Close()
-
-	if hasFlag("--last") {
-		var scanID string
-		err := db.QueryRow(`SELECT id FROM scans ORDER BY created_at DESC LIMIT 1`).Scan(&scanID)
-		if err != nil {
-			log.Fatal("Aucun scan trouvé")
-		}
-		printReport(db, scanID)
-		return
-	}
-
-	scanNum := getArg("--scan")
-	if scanNum == "" {
-		log.Fatal("Erreur : --last ou --scan <n°> requis")
-	}
-
-	idx, err := strconv.Atoi(scanNum)
-	if err != nil || idx < 1 {
-		log.Fatal("Numéro invalide")
-	}
-
-	var scanID string
-	err = db.QueryRow(`
-		SELECT id FROM scans
-		ORDER BY created_at DESC
-		LIMIT 1 OFFSET $1
-	`, idx-1).Scan(&scanID)
-	if err != nil {
-		log.Fatalf("Scan numéro %d introuvable", idx)
-	}
-
-	printReport(db, scanID)
-}
-
 func printRecommendations(db *sql.DB, scanID string) {
 	rows, err := db.Query(`
 		SELECT title, priority, findings_summary, recommendation, generated_at
@@ -512,6 +613,48 @@ func printRecommendations(db *sql.DB, scanID string) {
 		fmt.Printf("  Généré   : %s\n", generatedAt.Format("2006-01-02 15:04:05"))
 	}
 }
+
+func cmdReport() {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	if hasFlag("--last") {
+		var scanID string
+		err := db.QueryRow(`SELECT id FROM scans ORDER BY created_at DESC LIMIT 1`).Scan(&scanID)
+		if err != nil {
+			log.Fatal("Aucun scan trouvé")
+		}
+		printReport(db, scanID)
+		return
+	}
+
+	scanNum := getArg("--scan")
+	if scanNum == "" {
+		log.Fatal("Erreur : --last ou --scan <n°> requis")
+	}
+
+	idx, err := strconv.Atoi(scanNum)
+	if err != nil || idx < 1 {
+		log.Fatal("Numéro invalide")
+	}
+
+	var scanID string
+	err = db.QueryRow(`
+		SELECT id FROM scans
+		ORDER BY created_at DESC
+		LIMIT 1 OFFSET $1
+	`, idx-1).Scan(&scanID)
+	if err != nil {
+		log.Fatalf("Scan numéro %d introuvable", idx)
+	}
+
+	printReport(db, scanID)
+}
+
+// ─── AI ─────────────────────────────────────────────────
 
 func cmdAI() {
 	if len(os.Args) < 3 {
@@ -622,7 +765,6 @@ func cmdAIUse() {
 		return
 	}
 
-	// Avertissement pour les providers externes
 	if provider != "ollama" {
 		fmt.Printf("\n⚠️  Attention — Provider externe sélectionné\n")
 		fmt.Printf("   Les findings de vos scans seront envoyés à %s.\n", provider)
@@ -676,6 +818,8 @@ func cmdAIConfig() {
 
 	fmt.Printf("✓ Clé API configurée pour %s\n", provider)
 }
+
+// ─── Intel ──────────────────────────────────────────────
 
 func cmdIntel() {
 	if len(os.Args) < 3 {
