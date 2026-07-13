@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aegis/cmd/aegis/export"
 	"github.com/aegis/pkg/crypto"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
@@ -738,21 +739,14 @@ func printRecommendations(db *sql.DB, scanID string) {
 	}
 }
 
-func cmdReport() {
-	db, err := sql.Open("postgres", dbURL)
-	if err != nil {
-		log.Fatalf("Erreur PostgreSQL : %v", err)
-	}
-	defer db.Close()
-
+func resolveScanID(db *sql.DB) string {
 	if hasFlag("--last") {
 		var scanID string
 		err := db.QueryRow(`SELECT id FROM scans ORDER BY created_at DESC LIMIT 1`).Scan(&scanID)
 		if err != nil {
 			log.Fatal("Aucun scan trouvé")
 		}
-		printReport(db, scanID)
-		return
+		return scanID
 	}
 
 	scanNum := getArg("--scan")
@@ -774,8 +768,69 @@ func cmdReport() {
 	if err != nil {
 		log.Fatalf("Scan numéro %d introuvable", idx)
 	}
+	return scanID
+}
+
+func cmdReport() {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	scanID := resolveScanID(db)
+
+	exportFormat := getArg("--export")
+	if exportFormat != "" {
+		cmdReportExport(db, scanID, exportFormat)
+		return
+	}
 
 	printReport(db, scanID)
+}
+
+func cmdReportExport(db *sql.DB, scanID string, format string) {
+	outputPath := getArg("--output")
+
+	var ext string
+	switch format {
+	case "json":
+		ext = "json"
+	case "markdown", "md":
+		ext = "md"
+	case "pdf":
+		ext = "pdf"
+	default:
+		fmt.Printf("✗ Format inconnu : %s (attendu : json, markdown, pdf)\n", format)
+		os.Exit(1)
+	}
+
+	if outputPath == "" {
+		outputPath = fmt.Sprintf("aegis-report-%s.%s", scanID[:8], ext)
+	}
+
+	var err error
+	switch format {
+	case "json":
+		err = export.ExportJSON(db, scanID, outputPath)
+	case "markdown", "md":
+		err = export.ExportMarkdown(db, scanID, outputPath)
+	case "pdf":
+		err = export.ExportPDF(db, scanID, outputPath)
+	}
+
+	if err != nil {
+		fmt.Printf("✗ Erreur d'export : %v\n", err)
+		os.Exit(1)
+	}
+
+	writeAuditLog(db, "report_exported", fmt.Sprintf("Rapport exporté en %s : %s", format, outputPath), map[string]interface{}{
+		"scan_id": scanID,
+		"format":  format,
+		"path":    outputPath,
+	})
+
+	fmt.Printf("✓ Rapport exporté : %s\n", outputPath)
 }
 
 // ─── AI ─────────────────────────────────────────────────
