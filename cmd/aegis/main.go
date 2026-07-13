@@ -1,7 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -42,6 +46,8 @@ func main() {
 		cmdScope()
 	case "audit":
 		cmdAudit()
+	case "gateway":
+		cmdGateway()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -952,4 +958,145 @@ func cmdAudit() {
 	if count == 0 {
 		fmt.Println("  Aucune entrée d'audit trouvée.")
 	}
+}
+
+func cmdGateway() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage:")
+		fmt.Println("  aegis gateway generate-key --label <nom>")
+		fmt.Println("  aegis gateway list-keys")
+		fmt.Println("  aegis gateway revoke-key <id>")
+		return
+	}
+
+	switch os.Args[2] {
+	case "generate-key":
+		cmdGatewayGenerateKey()
+	case "list-keys":
+		cmdGatewayListKeys()
+	case "revoke-key":
+		cmdGatewayRevokeKey()
+	default:
+		fmt.Println("Commande inconnue")
+	}
+}
+
+func cmdGatewayGenerateKey() {
+	label := getArg("--label")
+	if label == "" {
+		label = "clé sans nom"
+	}
+
+	rawKey := make([]byte, 32)
+	if _, err := rand.Read(rawKey); err != nil {
+		log.Fatalf("Erreur génération : %v", err)
+	}
+	apiKey := "aegis_" + base64.RawURLEncoding.EncodeToString(rawKey)
+
+	hash := sha256.Sum256([]byte(apiKey))
+	hashHex := hex.EncodeToString(hash[:])
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		INSERT INTO api_keys (key_hash, label)
+		VALUES ($1, $2)
+	`, hashHex, label)
+	if err != nil {
+		log.Fatalf("Erreur création clé : %v", err)
+	}
+
+	writeAuditLog(db, "gateway_key_created", fmt.Sprintf("Clé API Gateway créée : '%s'", label), map[string]interface{}{
+		"label": label,
+	})
+
+	fmt.Println("\n✓ Clé API générée avec succès")
+	fmt.Println("\n⚠️  Cette clé ne sera plus jamais affichée. Copiez-la maintenant :")
+	fmt.Printf("\n  %s\n\n", apiKey)
+	fmt.Println("Utilisation : header 'X-API-Key: <clé>' sur chaque requête au Gateway")
+}
+
+func cmdGatewayListKeys() {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT id, label, active, created_at, last_used_at
+		FROM api_keys
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		log.Fatalf("Erreur requête : %v", err)
+	}
+	defer rows.Close()
+
+	fmt.Println("\n=== AegiS Gateway — Clés API ===\n")
+	count := 0
+	for rows.Next() {
+		var id, label string
+		var active bool
+		var createdAt time.Time
+		var lastUsedAt *time.Time
+
+		rows.Scan(&id, &label, &active, &createdAt, &lastUsedAt)
+
+		status := "✓ active"
+		if !active {
+			status = "✗ révoquée"
+		}
+
+		lastUsed := "jamais utilisée"
+		if lastUsedAt != nil {
+			lastUsed = lastUsedAt.Format("2006-01-02 15:04:05")
+		}
+
+		fmt.Printf("  [%s] %s\n", status, label)
+		fmt.Printf("    ID   : %s\n", id)
+		fmt.Printf("    Créée: %s\n", createdAt.Format("2006-01-02 15:04:05"))
+		fmt.Printf("    Utilisée pour la dernière fois : %s\n\n", lastUsed)
+		count++
+	}
+
+	if count == 0 {
+		fmt.Println("  Aucune clé API générée.")
+		fmt.Println("  → aegis gateway generate-key --label <nom>")
+	}
+}
+
+func cmdGatewayRevokeKey() {
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: aegis gateway revoke-key <id>")
+		return
+	}
+	keyID := os.Args[3]
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	result, err := db.Exec(`UPDATE api_keys SET active = false WHERE id = $1`, keyID)
+	if err != nil {
+		log.Fatalf("Erreur révocation : %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		fmt.Println("Aucune clé trouvée avec cet ID.")
+		return
+	}
+
+	writeAuditLog(db, "gateway_key_revoked", fmt.Sprintf("Clé API Gateway révoquée : %s", keyID), map[string]interface{}{
+		"key_id": keyID,
+	})
+
+	fmt.Printf("✓ Clé révoquée : %s\n", keyID)
 }

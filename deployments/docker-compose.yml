@@ -77,6 +77,19 @@ services:
       DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
       NATS_URL: nats://aegis:aegis@nats:4222
 
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployments/dockerfiles/gateway.dockerfile
+    container_name: aegis-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: host=postgres user=aegis password=aegis dbname=aegis sslmode=disable
+
   ai:
     build:
       context: ..
