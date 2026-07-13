@@ -17,3 +17,11 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Binaires compilés (racine et sous-dossiers)
+/aegis
+/orchestrator
+/gateway
+cmd/*/aegis
+cmd/*/orchestrator
+cmd/*/gateway
