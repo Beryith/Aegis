@@ -87,8 +87,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      nats:
+        condition: service_started
     environment:
       DB_URL: host=postgres user=aegis password=aegis dbname=aegis sslmode=disable
+      NATS_URL: nats://aegis:aegis@nats:4222
 
   ai:
     build:

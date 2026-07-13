@@ -13,7 +13,12 @@ func main() {
 		dbURL = "host=127.0.0.1 user=aegis password=aegis dbname=aegis sslmode=disable"
 	}
 
-	g, err := gateway.New(dbURL)
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = "nats://aegis:aegis@localhost:4222"
+	}
+
+	g, err := gateway.New(dbURL, natsURL)
 	if err != nil {
 		log.Fatalf("[gateway] Erreur d'initialisation : %v", err)
 	}
