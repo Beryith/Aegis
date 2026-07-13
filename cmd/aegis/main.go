@@ -218,13 +218,6 @@ func cmdScan() {
 		log.Fatal("Erreur : --target requis")
 	}
 
-	scopeCfg := loadScope()
-	if !isTargetInScope(scopeCfg, target) {
-		fmt.Printf("✗ Refus : '%s' n'est pas dans le périmètre autorisé.\n", target)
-		fmt.Println("  → aegis scope list  pour voir les cibles autorisées")
-		os.Exit(1)
-	}
-
 	scanID := uuid.New().String()
 
 	db, err := sql.Open("postgres", dbURL)
