@@ -48,6 +48,8 @@ func main() {
 		cmdAudit()
 	case "gateway":
 		cmdGateway()
+	case "help":
+		printFullHelp()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -55,23 +57,131 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  aegis scan --target <cible>")
-	fmt.Println("  aegis results")
-	fmt.Println("  aegis results --target <cible>")
-	fmt.Println("  aegis results --since <YYYY-MM-DD>")
-	fmt.Println("  aegis results --page <n°>")
-	fmt.Println("  aegis report --last")
-	fmt.Println("  aegis report --scan <n°>")
-	fmt.Println("  aegis ai status")
-	fmt.Println("  aegis ai use <provider>")
-	fmt.Println("  aegis ai config <provider> --key <clé>")
-	fmt.Println("  aegis intel update-exploitdb")
-	fmt.Println("  aegis scope list")
-	fmt.Println("  aegis scope add <cible>")
-	fmt.Println("  aegis scope remove <cible>")
-	fmt.Println("  aegis audit")
-	fmt.Println("  aegis audit --type <type> --limit <n>")
+	fmt.Println()
+	fmt.Println("  █████╗ ███████╗ ██████╗ ██╗███████╗")
+	fmt.Println(" ██╔══██╗██╔════╝██╔════╝ ██║██╔════╝")
+	fmt.Println(" ███████║█████╗  ██║  ███╗██║███████╗")
+	fmt.Println(" ██╔══██║██╔══╝  ██║   ██║██║╚════██║")
+	fmt.Println(" ██║  ██║███████╗╚██████╔╝██║███████║")
+	fmt.Println(" ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝╚══════╝")
+	fmt.Println()
+	fmt.Println("  Moteur d'analyse et d'orchestration de sécurité assisté par IA")
+	fmt.Println()
+	fmt.Println("Usage : aegis <commande> [options]")
+	fmt.Println()
+	fmt.Println("Commandes principales")
+	fmt.Println("  scan       Lancer un scan de sécurité sur une cible")
+	fmt.Println("  results    Lister les scans passés")
+	fmt.Println("  report     Afficher le rapport détaillé d'un scan")
+	fmt.Println("  ai         Gérer les providers d'intelligence artificielle")
+	fmt.Println("  intel      Gérer les sources de renseignement (exploit-db...)")
+	fmt.Println("  scope      Gérer le périmètre de cibles autorisées")
+	fmt.Println("  audit      Consulter le journal d'audit")
+	fmt.Println("  gateway    Gérer l'accès à l'API Gateway")
+	fmt.Println()
+	fmt.Println("  aegis help              Affiche l'aide complète, commande par commande")
+	fmt.Println("  aegis <commande> --help Affiche l'aide détaillée d'une commande précise")
+	fmt.Println()
+	fmt.Println("Exemple rapide")
+	fmt.Println("  aegis scan --target scanme.nmap.org")
+	fmt.Println()
+}
+
+func printFullHelp() {
+	sections := []struct {
+		title string
+		lines []string
+	}{
+		{
+			"scan — Lancer un scan de sécurité",
+			[]string{
+				"aegis scan --target <cible>",
+				"    Lance le pipeline complet (Discovery → Intelligence → Corrélation → IA)",
+				"    et affiche automatiquement le rapport une fois terminé.",
+			},
+		},
+		{
+			"results — Lister les scans passés",
+			[]string{
+				"aegis results",
+				"    Liste les 10 derniers scans, avec pagination.",
+				"aegis results --target <cible>",
+				"    Filtre les scans par cible.",
+				"aegis results --since <YYYY-MM-DD>",
+				"    Filtre les scans depuis une date donnée.",
+				"aegis results --page <n°>",
+				"    Affiche la page suivante de résultats.",
+			},
+		},
+		{
+			"report — Afficher un rapport détaillé",
+			[]string{
+				"aegis report --last",
+				"    Affiche le rapport complet du dernier scan.",
+				"aegis report --scan <n°>",
+				"    Affiche le rapport du scan numéro <n°> (voir 'aegis results').",
+			},
+		},
+		{
+			"ai — Gérer les providers d'intelligence artificielle",
+			[]string{
+				"aegis ai status",
+				"    Affiche le provider actif et l'état de configuration de chacun.",
+				"aegis ai use <provider>",
+				"    Change le provider actif (ollama, groq, gemini, openai, anthropic).",
+				"aegis ai config <provider> --key <clé>",
+				"    Configure et chiffre la clé API d'un provider externe.",
+			},
+		},
+		{
+			"intel — Sources de renseignement",
+			[]string{
+				"aegis intel update-exploitdb",
+				"    Retélécharge et réindexe la base locale d'exploits publics.",
+			},
+		},
+		{
+			"scope — Périmètre de cibles",
+			[]string{
+				"aegis scope list",
+				"    Liste les cibles actuellement autorisées.",
+				"aegis scope add <cible>",
+				"    Ajoute une cible au périmètre autorisé.",
+				"aegis scope remove <cible>",
+				"    Retire une cible du périmètre autorisé.",
+			},
+		},
+		{
+			"audit — Journal d'audit",
+			[]string{
+				"aegis audit",
+				"    Affiche les 20 dernières entrées d'audit.",
+				"aegis audit --type <type> --limit <n>",
+				"    Filtre par type d'événement, limite le nombre de résultats.",
+			},
+		},
+		{
+			"gateway — API Gateway",
+			[]string{
+				"aegis gateway generate-key --label <nom>",
+				"    Génère une nouvelle clé API pour le Gateway (affichée une seule fois).",
+				"aegis gateway list-keys",
+				"    Liste toutes les clés API générées et leur statut.",
+				"aegis gateway revoke-key <id>",
+				"    Révoque immédiatement une clé API.",
+			},
+		},
+	}
+
+	fmt.Println("\n=== AegiS — Aide complète ===")
+	for _, s := range sections {
+		fmt.Printf("\n%s\n", s.title)
+		fmt.Println("────────────────────────────────────────")
+		for _, line := range s.lines {
+			fmt.Println("  " + line)
+		}
+	}
+	fmt.Println()
 }
 
 func getArg(name string) string {
