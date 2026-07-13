@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aegis/pkg/crypto"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
@@ -799,11 +800,19 @@ func cmdAIConfig() {
 		return
 	}
 
+	masterKey := getMasterKey()
+	encryptedKey, err := crypto.Encrypt(masterKey, key)
+	if err != nil {
+		fmt.Println("✗ Erreur de chiffrement :", err)
+		os.Exit(1)
+	}
+
 	config := loadAegisConfig()
 	ai := config["ai"].(map[string]interface{})
 	providers := ai["providers"].(map[string]interface{})
 	p := providers[provider].(map[string]interface{})
-	p["api_key"] = key
+	p["api_key"] = encryptedKey
+	p["encrypted"] = true
 	providers[provider] = p
 	ai["providers"] = providers
 	config["ai"] = ai
