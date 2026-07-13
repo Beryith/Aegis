@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -94,6 +95,14 @@ func getMasterKey() []byte {
 		if checkValue != "" {
 			if _, err := crypto.Decrypt(key, checkValue); err != nil {
 				remaining := maxAttempts - attempt
+
+				if db, dberr := sql.Open("postgres", dbURL); dberr == nil {
+					writeAuditLog(db, "vault_auth_failed",
+						fmt.Sprintf("Tentative de mot de passe incorrecte (%d/%d)", attempt, maxAttempts),
+						map[string]interface{}{"attempt": attempt})
+					db.Close()
+				}
+
 				if remaining > 0 {
 					fmt.Printf("✗ Mot de passe incorrect (%d tentative(s) restante(s))\n", remaining)
 					continue

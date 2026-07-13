@@ -40,6 +40,8 @@ func main() {
 		cmdIntel()
 	case "scope":
 		cmdScope()
+	case "audit":
+		cmdAudit()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -62,6 +64,8 @@ func printUsage() {
 	fmt.Println("  aegis scope list")
 	fmt.Println("  aegis scope add <cible>")
 	fmt.Println("  aegis scope remove <cible>")
+	fmt.Println("  aegis audit")
+	fmt.Println("  aegis audit --type <type> --limit <n>")
 }
 
 func getArg(name string) string {
@@ -260,6 +264,11 @@ func cmdScan() {
 	if err := nc.Publish("aegis.discovery.scan", payload); err != nil {
 		log.Fatalf("Erreur publication : %v", err)
 	}
+
+	writeAuditLog(db, "scan_launched", fmt.Sprintf("Scan lancé sur '%s'", target), map[string]interface{}{
+		"scan_id": scanID,
+		"target":  target,
+	})
 
 	fmt.Printf("✓ Scan lancé\n")
 	fmt.Printf("  Cible   : %s\n", target)
@@ -783,6 +792,13 @@ func cmdAIUse() {
 	config["ai"] = ai
 	saveAegisConfig(config)
 
+	if db, err := sql.Open("postgres", dbURL); err == nil {
+		writeAuditLog(db, "ai_provider_changed", fmt.Sprintf("Provider IA changé vers '%s'", provider), map[string]interface{}{
+			"provider": provider,
+		})
+		db.Close()
+	}
+
 	fmt.Printf("✓ Provider actif : %s\n", provider)
 	if provider == "ollama" {
 		fmt.Println("  Aucune donnée ne quitte votre infrastructure.")
@@ -877,5 +893,63 @@ func cmdUpdateExploitDB() {
 		fmt.Printf("  Date             : %s\n", dateStr)
 	} else {
 		fmt.Printf("✗ Échec de la mise à jour : %s\n", response.Error)
+	}
+}
+
+func writeAuditLog(db *sql.DB, eventType string, description string, metadata map[string]interface{}) {
+	metaJSON, _ := json.Marshal(metadata)
+	_, err := db.Exec(`
+		INSERT INTO audit_log (event_type, description, metadata)
+		VALUES ($1, $2, $3)
+	`, eventType, description, string(metaJSON))
+	if err != nil {
+		// L'audit ne doit jamais bloquer l'exécution normale, mais on garde une trace
+		fmt.Fprintln(os.Stderr, "⚠ Erreur d'écriture de l'audit log :", err)
+	}
+}
+
+func cmdAudit() {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Erreur PostgreSQL : %v", err)
+	}
+	defer db.Close()
+
+	limit := 20
+	if l := getArg("--limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	eventFilter := getArg("--type")
+
+	query := `SELECT event_type, description, metadata, created_at FROM audit_log WHERE 1=1`
+	args := []interface{}{}
+	if eventFilter != "" {
+		query += " AND event_type = $1"
+		args = append(args, eventFilter)
+	}
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT %d", limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Fatalf("Erreur requête : %v", err)
+	}
+	defer rows.Close()
+
+	fmt.Println("\n=== AegiS — Journal d'audit ===\n")
+	count := 0
+	for rows.Next() {
+		var eventType, description, metadata string
+		var createdAt time.Time
+		rows.Scan(&eventType, &description, &metadata, &createdAt)
+		fmt.Printf("[%s] %s\n", createdAt.Format("2006-01-02 15:04:05"), eventType)
+		fmt.Printf("  %s\n\n", description)
+		count++
+	}
+
+	if count == 0 {
+		fmt.Println("  Aucune entrée d'audit trouvée.")
 	}
 }
