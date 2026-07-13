@@ -22,6 +22,10 @@ HEALTH_PORT = 9104
 
 health = HealthServer("ai", HEALTH_PORT)
 
+# Credentials transmis par scan, en mémoire uniquement (jamais sur disque).
+# Purgées après usage pour limiter la fenêtre d'exposition.
+scan_credentials = {}
+
 class AIProvider(ABC):
     @abstractmethod
     async def generate(self, prompt: str) -> str:
@@ -177,11 +181,17 @@ def load_config() -> dict:
         log.error(f"Erreur chargement config : {e}")
         return {"ai": {"provider": "ollama", "providers": {"ollama": {"url": "http://localhost:11434", "model": "mistral"}}}}
 
-def get_provider(config: dict) -> AIProvider:
+def get_provider(config: dict, api_key_override: str = None) -> AIProvider:
     ai_config = config.get("ai", {})
     provider_name = ai_config.get("provider", "ollama")
     providers_config = ai_config.get("providers", {})
-    provider_config = providers_config.get(provider_name, {})
+    provider_config = dict(providers_config.get(provider_name, {}))
+
+    if api_key_override:
+        provider_config["api_key"] = api_key_override
+        log.info(f"Provider actif : {provider_name} (clé transmise pour ce scan)")
+    else:
+        log.info(f"Provider actif : {provider_name}")
 
     providers = {
         "ollama": OllamaProvider,
@@ -192,7 +202,6 @@ def get_provider(config: dict) -> AIProvider:
     }
 
     cls = providers.get(provider_name, OllamaProvider)
-    log.info(f"Provider actif : {provider_name}")
     return cls(provider_config)
 
 async def generate_one_recommendation(conn, provider: AIProvider, scan_id: str,
@@ -323,6 +332,15 @@ async def generate_recommendation(scan_id: str, conn, provider: AIProvider):
     await generate_one_recommendation(conn, provider, scan_id, "Analyse globale", findings)
 
 
+async def handle_credentials_request(msg):
+    data = json.loads(msg.data.decode())
+    scan_id = data.get("scan_id")
+    api_key = data.get("api_key")
+    if scan_id and api_key:
+        scan_credentials[scan_id] = api_key
+        log.info(f"Credentials reçues pour le scan {scan_id} (en mémoire uniquement)")
+
+
 async def handle_ai_request(msg):
     data = json.loads(msg.data.decode())
     scan_id = data.get("scan_id")
@@ -330,7 +348,10 @@ async def handle_ai_request(msg):
     health.set_check("last_task", True, f"scan_id={scan_id}")
 
     config = load_config()
-    provider = get_provider(config)
+
+    # Utilise la clé transmise pour ce scan si disponible, puis la purge immédiatement
+    api_key_override = scan_credentials.pop(scan_id, None)
+    provider = get_provider(config, api_key_override)
 
     async def db_connect():
         return await asyncpg.connect(DB_URL)
@@ -363,6 +384,7 @@ async def main():
     log.info(f"Provider actif : {provider_name}")
 
     await nc.subscribe("aegis.ai.analyze", cb=handle_ai_request)
+    await nc.subscribe("aegis.ai.credentials", cb=handle_credentials_request)
     log.info("En attente de tâches sur aegis.ai.analyze")
 
     health.set_ready()

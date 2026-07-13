@@ -247,6 +247,11 @@ func cmdScan() {
 	}
 	defer nc.Close()
 
+	// Les credentials doivent être transmises et prises en compte AVANT
+	// que le pipeline ne démarre, pour éviter une course avec l'AI Layer
+	// qui peut terminer très vite (ex: avec Groq).
+	transmitProviderCredentials(nc, scanID)
+
 	payload, _ := json.Marshal(map[string]string{
 		"scan_id": scanID,
 		"target":  target,

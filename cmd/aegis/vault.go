@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/aegis/pkg/crypto"
+	"github.com/nats-io/nats.go"
 	"golang.org/x/term"
 )
 
@@ -31,6 +32,8 @@ func promptConfirm(prompt string) string {
 
 // getMasterKey retourne la clé dérivée du mot de passe maître.
 // Utilise le cache de session si valide (15 min), sinon demande le mot de passe.
+const vaultCheckPlaintext = "aegis-vault-check-ok"
+
 func getMasterKey() []byte {
 	session := crypto.NewSessionCache()
 	if key := session.Load(); key != nil {
@@ -60,25 +63,52 @@ func getMasterKey() []byte {
 			os.Exit(1)
 		}
 
+		key := crypto.DeriveKey(pw1, salt)
+		check, err := crypto.Encrypt(key, vaultCheckPlaintext)
+		if err != nil {
+			fmt.Println("✗ Erreur d'initialisation du coffre :", err)
+			os.Exit(1)
+		}
+
 		config["vault"] = map[string]interface{}{
-			"salt": base64Encode(salt),
+			"salt":  base64Encode(salt),
+			"check": check,
 		}
 		saveAegisConfig(config)
 
-		key := crypto.DeriveKey(pw1, salt)
 		session.Store(key)
 		fmt.Println("✓ Mot de passe maître défini")
 		return key
 	}
 
-	// Mot de passe déjà configuré — on le redemande
+	// Mot de passe déjà configuré — on le redemande, avec plusieurs tentatives
 	saltB64, _ := vault["salt"].(string)
 	salt := base64Decode(saltB64)
+	checkValue, _ := vault["check"].(string)
 
-	pw := promptPassword("Mot de passe AegiS : ")
-	key := crypto.DeriveKey(pw, salt)
-	session.Store(key)
-	return key
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		pw := promptPassword("Mot de passe AegiS : ")
+		key := crypto.DeriveKey(pw, salt)
+
+		if checkValue != "" {
+			if _, err := crypto.Decrypt(key, checkValue); err != nil {
+				remaining := maxAttempts - attempt
+				if remaining > 0 {
+					fmt.Printf("✗ Mot de passe incorrect (%d tentative(s) restante(s))\n", remaining)
+					continue
+				}
+				fmt.Println("✗ Mot de passe incorrect. Abandon.")
+				os.Exit(1)
+			}
+		}
+
+		session.Store(key)
+		return key
+	}
+
+	os.Exit(1)
+	return nil
 }
 
 func base64Encode(data []byte) string {
@@ -90,4 +120,57 @@ func base64Decode(s string) []byte {
 	var data []byte
 	json.Unmarshal([]byte(s), &data)
 	return data
+}
+
+// transmitProviderCredentials déchiffre localement la clé API du provider IA actif
+// (si c'est un provider externe) et la transmet UNE FOIS à l'AI Layer via NATS,
+// liée au scan_id. La clé n'est jamais écrite en clair sur disque côté conteneur.
+func transmitProviderCredentials(nc *nats.Conn, scanID string) {
+	config := loadAegisConfig()
+	ai, ok := config["ai"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	provider, ok := ai["provider"].(string)
+	if !ok || provider == "ollama" {
+		return // Ollama est local, aucun secret à transmettre
+	}
+
+	providers, ok := ai["providers"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	p, ok := providers[provider].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	encryptedKey, _ := p["api_key"].(string)
+	isEncrypted, _ := p["encrypted"].(bool)
+
+	if encryptedKey == "" {
+		return
+	}
+
+	var plainKey string
+	if isEncrypted {
+		masterKey := getMasterKey()
+		decrypted, err := crypto.Decrypt(masterKey, encryptedKey)
+		if err != nil {
+			fmt.Println("✗ Erreur de déchiffrement de la clé API :", err)
+			os.Exit(1)
+		}
+		plainKey = decrypted
+	} else {
+		// Ancienne clé non chiffrée (compatibilité transitoire)
+		plainKey = encryptedKey
+	}
+
+	payload, _ := json.Marshal(map[string]string{
+		"scan_id":  scanID,
+		"provider": provider,
+		"api_key":  plainKey,
+	})
+
+	nc.Publish("aegis.ai.credentials", payload)
 }
