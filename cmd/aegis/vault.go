@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -121,14 +122,20 @@ func getMasterKey() []byte {
 }
 
 func base64Encode(data []byte) string {
-	b, _ := json.Marshal(data)
-	return string(b)
+	return base64.StdEncoding.EncodeToString(data)
 }
 
 func base64Decode(s string) []byte {
-	var data []byte
-	json.Unmarshal([]byte(s), &data)
-	return data
+	if data, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return data
+	}
+	// Compatibilité avec les vaults créés avant ce correctif, où le sel était
+	// encodé via un détour par encoding/json (json.Marshal d'un []byte produit
+	// aussi du base64, mais entouré de guillemets littéraux) au lieu de
+	// encoding/base64 directement.
+	var legacy []byte
+	json.Unmarshal([]byte(s), &legacy)
+	return legacy
 }
 
 // transmitProviderCredentials déchiffre localement la clé API du provider IA actif
