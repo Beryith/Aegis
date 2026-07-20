@@ -51,3 +51,48 @@ CREATE TABLE recommendations (
     generated_by VARCHAR(50),
     generated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Compteur d'enrichissements en attente, utilisé par Discovery/Intelligence
+-- pour savoir quand déclencher la corrélation (voir services/intelligence/main.py)
+ALTER TABLE scans ADD COLUMN pending_enrichments INTEGER NOT NULL DEFAULT 0;
+
+-- Audit log (append-only)
+CREATE TABLE audit_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type VARCHAR(50) NOT NULL,
+    description TEXT,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Append-only au niveau base de données : même un bug applicatif
+-- ne peut pas altérer ou supprimer une entrée existante (voir docs/SECURITY.md)
+REVOKE UPDATE, DELETE ON audit_log FROM aegis;
+
+-- Clés API du Gateway HTTP
+CREATE TABLE api_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    key_hash VARCHAR(64) NOT NULL UNIQUE,
+    label VARCHAR(100),
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_used_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Base locale d'exploits publics (exploit-db), indexée via 'aegis intel update-exploitdb'
+CREATE TABLE exploit_db (
+    edb_id INTEGER PRIMARY KEY,
+    title VARCHAR(500),
+    cve_ids TEXT[],
+    exploit_type VARCHAR(50),
+    platform VARCHAR(50),
+    verified BOOLEAN DEFAULT false
+);
+
+CREATE INDEX idx_exploit_db_cve_ids ON exploit_db USING GIN (cve_ids);
+
+CREATE TABLE exploit_db_meta (
+    id INTEGER PRIMARY KEY,
+    last_updated TIMESTAMP WITH TIME ZONE,
+    total_entries INTEGER
+);
