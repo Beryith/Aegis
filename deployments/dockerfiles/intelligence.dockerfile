@@ -4,7 +4,8 @@ RUN apt-get update && apt-get install -y whois && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN pip install nats-py asyncpg aiohttp python-whois --no-cache-dir
+COPY services/intelligence/requirements.txt ./requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 
 COPY services/intelligence/main.py ./
 COPY services/intelligence/update_exploitdb.py ./

@@ -4,7 +4,8 @@ RUN apt-get update && apt-get install -y nmap && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN pip install nats-py asyncpg python-nmap aiohttp --no-cache-dir
+COPY services/discovery/requirements.txt ./requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 
 COPY services/discovery/main.py ./
 COPY services/utils.py ./

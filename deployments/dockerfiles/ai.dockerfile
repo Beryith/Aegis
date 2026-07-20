@@ -2,7 +2,8 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN pip install nats-py asyncpg aiohttp --no-cache-dir
+COPY services/ai/requirements.txt ./requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 
 COPY services/ai/main.py ./
 COPY services/utils.py ./

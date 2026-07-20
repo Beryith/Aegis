@@ -2,7 +2,8 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN pip install nats-py asyncpg aiohttp --no-cache-dir
+COPY services/intelligence/requirements-correlator.txt ./requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 
 COPY services/intelligence/correlator.py ./main.py
 COPY services/utils.py ./
