@@ -22,13 +22,19 @@ log = get_logger("intelligence")
 DB_URL = os.getenv("DB_URL", "postgresql://aegis:aegis@127.0.0.1:5432/aegis")
 NATS_URL = os.getenv("NATS_URL", "nats://aegis:aegis@localhost:4222")
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+# Optionnelle : sans clé, l'API NVD publique limite à 5 requêtes/30s, ce qui
+# devient le goulot d'étranglement principal sur un scan avec beaucoup de
+# services. Une clé gratuite (https://nvd.nist.gov/developers/request-an-api-key)
+# relève la limite à 50 requêtes/30s.
+NVD_API_KEY = os.getenv("NVD_API_KEY", "")
 HEALTH_PORT = 9102
 
 health = HealthServer("intelligence", HEALTH_PORT)
 
 async def _query_nvd(url: str) -> list:
+    headers = {"apiKey": NVD_API_KEY} if NVD_API_KEY else {}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 404:
                 return []
             if resp.status != 200:
@@ -92,12 +98,22 @@ async def lookup_cve(service: str, version: str) -> list:
 
 async def lookup_whois(host: str) -> dict:
     try:
-        w = whois.whois(host)
+        # whois.whois() est une bibliothèque synchrone (socket bloquant) — on la
+        # délègue à un thread pour ne pas geler la boucle asyncio, avec un timeout
+        # au cas où le serveur WHOIS de la cible ne répond jamais.
+        loop = asyncio.get_running_loop()
+        w = await asyncio.wait_for(
+            loop.run_in_executor(None, whois.whois, host),
+            timeout=10
+        )
         return {
             "registrar": str(w.registrar) if w.registrar else None,
             "creation_date": str(w.creation_date) if w.creation_date else None,
             "country": str(w.country) if w.country else None,
         }
+    except asyncio.TimeoutError:
+        log.warning(f"Timeout WHOIS pour {host}")
+        return {}
     except Exception as e:
         log.warning(f"Erreur WHOIS pour {host}: {e}")
         return {}
