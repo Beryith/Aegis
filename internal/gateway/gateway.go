@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +22,12 @@ type Gateway struct {
 }
 
 func New(dbURL string, natsURL string) (*Gateway, error) {
+	// Mode "release" par défaut (logs de debug désactivés, moins verbeux) —
+	// surchageable en dev via GIN_MODE=debug.
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		return nil, err
