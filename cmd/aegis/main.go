@@ -20,11 +20,23 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-const (
-	natsURL  = "nats://aegis:aegis@localhost:4222"
-	dbURL    = "host=127.0.0.1 user=aegis password=aegis dbname=aegis sslmode=disable"
-	pageSize = 10
+const pageSize = 10
+
+// natsURL et dbURL sont surchageables via les variables d'environnement NATS_URL/DB_URL
+// (mêmes noms que les services Python), pour permettre à la CLI de cibler une infra
+// distante sans recompiler. Par défaut, on garde le comportement historique
+// (stack Docker Compose locale).
+var (
+	natsURL = getEnvOrDefault("NATS_URL", "nats://aegis:aegis@localhost:4222")
+	dbURL   = getEnvOrDefault("DB_URL", "host=127.0.0.1 user=aegis password=aegis dbname=aegis sslmode=disable")
 )
+
+func getEnvOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 func main() {
 	if len(os.Args) < 2 {
