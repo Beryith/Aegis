@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import json
 import os
 import nmap
@@ -52,13 +53,22 @@ async def store_finding(conn, scan_id: str, asset_id: str, finding: dict):
     )
     log.info(f"Finding stocké : {title}")
 
+def classify_exposure(host: str) -> str:
+    """Nmap rapporte l'hôte scanné sous forme d'IP résolue : si elle appartient
+    à un bloc privé (RFC 1918 etc.), l'asset est interne, sinon exposé sur Internet."""
+    try:
+        return "internal" if ipaddress.ip_address(host).is_private else "internet"
+    except ValueError:
+        return "internet"
+
 async def store_asset(conn, host: str) -> str:
+    exposure = classify_exposure(host)
     row = await conn.fetchrow("""
         INSERT INTO assets (type, value, criticality, exposure, discovered_at, discovered_by)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT DO NOTHING
         RETURNING id
-    """, "host", host, "medium", "internet", datetime.now(timezone.utc), "discovery")
+    """, "host", host, "medium", exposure, datetime.now(timezone.utc), "discovery")
 
     if row:
         return str(row["id"])

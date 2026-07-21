@@ -4,6 +4,7 @@ services:
   nats:
     image: nats:latest
     container_name: aegis-nats
+    restart: unless-stopped
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -17,6 +18,7 @@ services:
   postgres:
     image: postgres:17
     container_name: aegis-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: aegis
       POSTGRES_PASSWORD: aegis
@@ -37,6 +39,7 @@ services:
       context: ..
       dockerfile: deployments/dockerfiles/discovery.dockerfile
     container_name: aegis-discovery
+    restart: unless-stopped
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -48,12 +51,19 @@ services:
     environment:
       DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
       NATS_URL: nats://aegis:aegis@nats:4222
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:9101/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   intelligence:
     build:
       context: ..
       dockerfile: deployments/dockerfiles/intelligence.dockerfile
     container_name: aegis-intelligence
+    restart: unless-stopped
     depends_on:
       nats:
         condition: service_started
@@ -62,12 +72,20 @@ services:
     environment:
       DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
       NATS_URL: nats://aegis:aegis@nats:4222
+      NVD_API_KEY: ${NVD_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:9102/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   correlator:
     build:
       context: ..
       dockerfile: deployments/dockerfiles/correlator.dockerfile
     container_name: aegis-correlator
+    restart: unless-stopped
     depends_on:
       nats:
         condition: service_started
@@ -76,12 +94,19 @@ services:
     environment:
       DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
       NATS_URL: nats://aegis:aegis@nats:4222
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:9103/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   gateway:
     build:
       context: ..
       dockerfile: deployments/dockerfiles/gateway.dockerfile
     container_name: aegis-gateway
+    restart: unless-stopped
     ports:
       - "8080:8080"
     depends_on:
@@ -92,12 +117,19 @@ services:
     environment:
       DB_URL: host=postgres user=aegis password=aegis dbname=aegis sslmode=disable
       NATS_URL: nats://aegis:aegis@nats:4222
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   ai:
     build:
       context: ..
       dockerfile: deployments/dockerfiles/ai.dockerfile
     container_name: aegis-ai
+    restart: unless-stopped
     depends_on:
       nats:
         condition: service_started
@@ -108,6 +140,12 @@ services:
     environment:
       DB_URL: postgresql://aegis:aegis@postgres:5432/aegis
       NATS_URL: nats://aegis:aegis@nats:4222
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:9104/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   aegis-postgres-data:
