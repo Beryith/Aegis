@@ -696,9 +696,9 @@ func printRecommendations(db *sql.DB, scanID string) {
 		SELECT title, priority, findings_summary, recommendation, generated_at
 		FROM recommendations
 		WHERE scan_id = $1
-		ORDER BY generated_at DESC`, scanID)
+		ORDER BY generated_at DESC
+	`, scanID)
 	if err != nil {
-		log.Printf("Error querying recommendations: %v, err")
 		return
 	}
 	defer rows.Close()
