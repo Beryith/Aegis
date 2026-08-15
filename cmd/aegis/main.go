@@ -88,7 +88,7 @@ func printUsage() {
 	fmt.Println("  report     Afficher le rapport détaillé d'un scan")
 	fmt.Println("  ai         Gérer les providers d'intelligence artificielle")
 	fmt.Println("  intel      Gérer les sources de renseignement (exploit-db...)")
-	//fmt.Println("  scope      Gérer le périmètre de cibles autorisées")
+	fmt.Println("  scope      Gérer le périmètre de cibles autorisées")
 	fmt.Println("  audit      Consulter le journal d'audit")
 	fmt.Println("  gateway    Gérer l'accès à l'API Gateway")
 	fmt.Println()
@@ -153,7 +153,7 @@ func printFullHelp() {
 				"    Retélécharge et réindexe la base locale d'exploits publics.",
 			},
 		},
-		/*{
+		{
 			"scope — Périmètre de cibles",
 			[]string{
 				"aegis scope list",
@@ -163,7 +163,7 @@ func printFullHelp() {
 				"aegis scope remove <cible>",
 				"    Retire une cible du périmètre autorisé.",
 			},
-		},*/
+		},
 		{
 			"audit — Journal d'audit",
 			[]string{
