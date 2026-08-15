@@ -403,7 +403,7 @@ func cmdScan() {
 	fmt.Printf("  Cible   : %s\n", target)
 	fmt.Printf("  Scan ID : %s\n", scanID)
 	fmt.Printf("  Heure   : %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Printf("⏳ Analyse en cours (Discovery → Intelligence → Corrélation → IA)...\n")
+	fmt.Printf("⏳ Analyse en cours (Discovery → Intelligence → Corrélation)...\n")
 
 	waitForCompletion(db, scanID)
 	printReport(db, scanID)
